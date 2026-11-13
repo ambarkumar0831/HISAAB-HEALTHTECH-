@@ -10,6 +10,28 @@ from app.models.schemas import BillExtraction
 logger = logging.getLogger(__name__)
 
 
+def _schema_without_defaults(schema: Any) -> Any:
+    if isinstance(schema, dict):
+        return {
+            key: _schema_without_defaults(value)
+            for key, value in schema.items()
+            if key != "default"
+        }
+    if isinstance(schema, list):
+        return [_schema_without_defaults(value) for value in schema]
+    return schema
+
+
+def _gemini_response_schema() -> Dict[str, Any]:
+    schema = BillExtraction.model_json_schema()
+    schema.get("properties", {}).pop("extraction_method", None)
+    if "required" in schema:
+        schema["required"] = [
+            field for field in schema["required"] if field != "extraction_method"
+        ]
+    return _schema_without_defaults(schema)
+
+
 class GeminiService:
     """Primary bill extraction service using Google Gemini API."""
 
@@ -52,7 +74,7 @@ class GeminiService:
                 contents=[uploaded_file, prompt],
                 config={
                     "response_mime_type": "application/json",
-                    "response_schema": BillExtraction,
+                    "response_schema": _gemini_response_schema(),
                 },
             )
 
@@ -107,8 +129,7 @@ class GeminiService:
         data = json.loads(cleaned)  # raises if invalid JSON
         # Normalize dates: Gemini may return various formats; keep as strings, Pydantic validates loosely
         extraction = BillExtraction.model_validate(data)
-        if not extraction.extraction_method:
-            extraction.extraction_method = "GEMINI"
+        extraction.extraction_method = "GEMINI"
         return extraction
 
     async def explain_findings(

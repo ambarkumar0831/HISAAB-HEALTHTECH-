@@ -99,7 +99,15 @@ class PDFService:
         story.append(Paragraph("Bill Items", styles["SectionHead"]))
         item_data = [["Item", "Qty", "Unit Price", "Billed Total", "Expected Total", "Status"]]
         for it in bill_items:
-            status = "Verified" if (it.get("expected_total") is None or abs((it.get("billed_total") or 0) - (it.get("expected_total") or 0)) < 0.01) else "Mismatch"
+            expected_total = it.get("expected_total")
+            billed_total = it.get("billed_total")
+            status = (
+                "Not compared"
+                if expected_total is None or billed_total is None
+                else "Matches"
+                if abs(billed_total - expected_total) < 0.01
+                else "Check total"
+            )
             item_data.append([
                 it.get("description") or "—",
                 str(it.get("quantity") or "—"),

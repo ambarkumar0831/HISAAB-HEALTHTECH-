@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { BarChart3, Plus, Loader2, AlertTriangle } from "lucide-react";
 import { benchmarkApi } from "../services/api";
 import type { BenchmarkRateOut } from "../types";
+import { useAuth } from "../contexts/AuthContext";
 
 export default function Benchmarks() {
+  const { session } = useAuth();
+  const isAdmin = session?.user.app_metadata?.hisaab_role === "admin";
   const [benchmarks, setBenchmarks] = useState<BenchmarkRateOut[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -47,12 +49,14 @@ export default function Benchmarks() {
             Published benchmark rates used for comparison. Admin can add or update rates.
           </p>
         </div>
-        <button
-          onClick={() => setOpen(true)}
-          className="btn-primary flex items-center gap-2"
-        >
-          <Plus size={16} /> Add Rate
-        </button>
+        {isAdmin && (
+          <button
+            onClick={() => setOpen(true)}
+            className="btn-primary flex items-center gap-2"
+          >
+            <Plus size={16} /> Add Rate
+          </button>
+        )}
       </div>
 
       {error && (
@@ -103,7 +107,7 @@ export default function Benchmarks() {
         </div>
       )}
 
-      {open && (
+      {open && isAdmin && (
         <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="bg-white rounded-xl p-6 w-full max-w-md shadow-xl">
             <h3 className="font-serif text-lg text-dark-teal mb-4">Add Benchmark Rate</h3>

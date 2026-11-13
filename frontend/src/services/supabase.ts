@@ -1,10 +1,21 @@
-// Supabase removed — frontend now works without authentication.
-// This file is kept as a stub for compatibility.
+import { createClient } from "@supabase/supabase-js";
 
-export const supabase = null as any;
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
-export type User = {
-  id: string;
-  email: string | null;
-  full_name: string | null;
-};
+export const supabaseConfigError =
+  !supabaseUrl || !supabaseAnonKey
+    ? "Supabase is not configured. Add VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to frontend/.env.local."
+    : "";
+
+export const supabase =
+  supabaseUrl && supabaseAnonKey
+    ? createClient(supabaseUrl, supabaseAnonKey, {
+        auth: {
+          flowType: "pkce",
+          persistSession: true,
+          autoRefreshToken: true,
+          detectSessionInUrl: true,
+        },
+      })
+    : null;

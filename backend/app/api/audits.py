@@ -1,19 +1,18 @@
 import os
 import uuid
-import shutil
 import logging
 from typing import Optional, List
 from decimal import Decimal
 
-from fastapi import APIRouter, UploadFile, File, HTTPException, Depends, Form
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import FileResponse
 
+from app.core.auth import AuthenticatedUser, get_current_user
 from app.core.config import settings
-from app.database.session import SessionLocal, get_db
+from app.database.session import get_user_db
 from app.models.sqlmodels import Audit, BillItem, AuditFinding, Report, ExtractionMethod, AuditStatus
 from app.models.schemas import (
-    AuditCreate, AuditOut, AuditDetailOut, BillItemOut, AuditFindingOut,
-    BillExtraction,
+    AuditOut, AuditDetailOut, BillItemExtract, BillExtraction,
 )
 from app.services.gemini_service import GeminiService
 from app.services.ocr_service import OCRService
@@ -41,8 +40,8 @@ def _validate_file(file: UploadFile) -> None:
 @router.post("/upload", status_code=202)
 async def upload_bill(
     file: UploadFile = File(...),
-    user_id: str = Form(default="anonymous"),
-    db: Session = Depends(get_db),
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_user_db),
 ):
     """Upload a hospital bill and create an audit record."""
     _validate_file(file)
@@ -53,7 +52,8 @@ async def upload_bill(
         raise HTTPException(status_code=413, detail="File too large")
 
     audit_id = str(uuid.uuid4())
-    safe_name = f"{audit_id}_{file.filename}"
+    _, extension = os.path.splitext(file.filename or "")
+    safe_name = f"{audit_id}{extension.lower()}"
     file_path = os.path.join(settings.UPLOAD_DIR, safe_name)
     os.makedirs(settings.UPLOAD_DIR, exist_ok=True)
 
@@ -62,7 +62,7 @@ async def upload_bill(
 
     audit = Audit(
         id=audit_id,
-        user_id=user_id,
+        user_id=user.id,
         status=AuditStatus.PENDING,
         extraction_method=ExtractionMethod.GEMINI,
     )
@@ -73,15 +73,18 @@ async def upload_bill(
     return {
         "audit_id": audit_id,
         "status": "PENDING",
-        "file_path": file_path,
         "message": "Bill uploaded. Call /extract to start extraction.",
     }
 
 
 @router.post("/{audit_id}/extract", response_model=dict)
-async def extract_bill(audit_id: str, db: Session = Depends(get_db)):
+async def extract_bill(
+    audit_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_user_db),
+):
     """Extract bill information using Gemini (primary) or Tesseract (fallback)."""
-    audit = db.query(Audit).filter(Audit.id == audit_id).first()
+    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user.id).first()
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
 
@@ -91,7 +94,7 @@ async def extract_bill(audit_id: str, db: Session = Depends(get_db)):
     # Find the uploaded file
     file_path = None
     for fname in os.listdir(settings.UPLOAD_DIR):
-        if fname.startswith(f"{audit_id}_"):
+        if fname.startswith(f"{audit_id}."):
             file_path = os.path.join(settings.UPLOAD_DIR, fname)
             break
     if not file_path or not os.path.exists(file_path):
@@ -141,7 +144,8 @@ async def extract_bill(audit_id: str, db: Session = Depends(get_db)):
     audit.status = AuditStatus.COMPLETED
     db.commit()
 
-    # Save bill items
+    # Replace items if extraction is retried after a network or client failure.
+    db.query(BillItem).filter(BillItem.audit_id == audit_id).delete(synchronize_session=False)
     for item in (extraction.items or []):
         db.add(BillItem(
             id=str(uuid.uuid4()),
@@ -157,16 +161,20 @@ async def extract_bill(audit_id: str, db: Session = Depends(get_db)):
     return {
         "audit_id": audit_id,
         "extraction_method": method,
-        "extraction": extraction.model_dump(),
+        "extraction": extraction.model_dump(mode="json"),
         "status": "COMPLETED",
         "message": "Extraction complete.",
     }
 
 
 @router.post("/{audit_id}/analyze", response_model=dict)
-async def analyze_audit(audit_id: str, db: Session = Depends(get_db)):
+async def analyze_audit(
+    audit_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_user_db),
+):
     """Run the Python audit engine on an extracted bill."""
-    audit = db.query(Audit).filter(Audit.id == audit_id).first()
+    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user.id).first()
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
 
@@ -178,14 +186,14 @@ async def analyze_audit(audit_id: str, db: Session = Depends(get_db)):
         bill_date=str(audit.bill_date) if audit.bill_date else None,
         admission_date=str(audit.admission_date) if audit.admission_date else None,
         discharge_date=str(audit.discharge_date) if audit.discharge_date else None,
-        grand_total=float(audit.original_total) if audit.original_total else None,
+        grand_total=float(audit.original_total) if audit.original_total is not None else None,
         subtotal=None,
         items=[
             BillItemExtract(
                 item_name=it.description,
-                quantity=float(it.quantity) if it.quantity else None,
-                unit_price=float(it.unit_price) if it.unit_price else None,
-                total=float(it.billed_total) if it.billed_total else None,
+                quantity=float(it.quantity) if it.quantity is not None else None,
+                unit_price=float(it.unit_price) if it.unit_price is not None else None,
+                total=float(it.billed_total) if it.billed_total is not None else None,
                 category=it.category,
             )
             for it in items
@@ -196,6 +204,20 @@ async def analyze_audit(audit_id: str, db: Session = Depends(get_db)):
     benchmark = BenchmarkService(db)
     engine = AuditEngine(benchmark_service=benchmark)
     result = engine.audit(extraction)
+
+    for item in items:
+        item.expected_total = None
+        item.is_flagged = 0
+
+    for item_check in result["arithmetic"].get("item_checks", []):
+        item_index = item_check.get("item_index")
+        if isinstance(item_index, int) and 0 <= item_index < len(items):
+            item = items[item_index]
+            expected_total = item_check.get("expected_total")
+            item.expected_total = (
+                Decimal(str(expected_total)) if expected_total is not None else None
+            )
+            item.is_flagged = int(item_check.get("status") == "MISMATCH")
 
     # Clear previous findings and rewrite
     db.query(AuditFinding).filter(AuditFinding.audit_id == audit_id).delete()
@@ -217,7 +239,8 @@ async def analyze_audit(audit_id: str, db: Session = Depends(get_db)):
             status=f.get("status", "open"),
         ))
 
-    audit.calculated_total = Decimal(str(result["calculated_total"])) if result.get("calculated_total") else None
+    calculated_total = result.get("calculated_total")
+    audit.calculated_total = Decimal(str(calculated_total)) if calculated_total is not None else None
     audit.status = AuditStatus.COMPLETED
     db.commit()
 
@@ -237,22 +260,33 @@ async def analyze_audit(audit_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("", response_model=List[AuditOut])
-def list_audits(user_id: str = "anonymous", db: Session = Depends(get_db)):
-    rows = db.query(Audit).filter(Audit.user_id == user_id).order_by(Audit.created_at.desc()).all()
+def list_audits(
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_user_db),
+):
+    rows = db.query(Audit).filter(Audit.user_id == user.id).order_by(Audit.created_at.desc()).all()
     return rows
 
 
 @router.get("/{audit_id}", response_model=AuditDetailOut)
-def get_audit(audit_id: str, user_id: str = "anonymous", db: Session = Depends(get_db)):
-    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user_id).first()
+def get_audit(
+    audit_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_user_db),
+):
+    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user.id).first()
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
     return audit
 
 
 @router.get("/{audit_id}/report")
-def download_report(audit_id: str, user_id: str = "anonymous", db: Session = Depends(get_db)):
-    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user_id).first()
+def download_report(
+    audit_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_user_db),
+):
+    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user.id).first()
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
 
@@ -269,16 +303,16 @@ def download_report(audit_id: str, user_id: str = "anonymous", db: Session = Dep
             "bill_date": str(audit.bill_date) if audit.bill_date else None,
             "admission_date": str(audit.admission_date) if audit.admission_date else None,
             "discharge_date": str(audit.discharge_date) if audit.discharge_date else None,
-            "original_total": float(audit.original_total) if audit.original_total else None,
-            "calculated_total": float(audit.calculated_total) if audit.calculated_total else None,
+            "original_total": float(audit.original_total) if audit.original_total is not None else None,
+            "calculated_total": float(audit.calculated_total) if audit.calculated_total is not None else None,
         },
         bill_items=[
             {
                 "description": it.description,
-                "quantity": float(it.quantity) if it.quantity else None,
-                "unit_price": float(it.unit_price) if it.unit_price else None,
-                "billed_total": float(it.billed_total) if it.billed_total else None,
-                "expected_total": float(it.expected_total) if it.expected_total else None,
+                "quantity": float(it.quantity) if it.quantity is not None else None,
+                "unit_price": float(it.unit_price) if it.unit_price is not None else None,
+                "billed_total": float(it.billed_total) if it.billed_total is not None else None,
+                "expected_total": float(it.expected_total) if it.expected_total is not None else None,
             }
             for it in items
         ],
@@ -286,7 +320,7 @@ def download_report(audit_id: str, user_id: str = "anonymous", db: Session = Dep
             {
                 "title": f.title,
                 "description": f.description,
-                "estimated_difference": float(f.estimated_difference) if f.estimated_difference else None,
+                "estimated_difference": float(f.estimated_difference) if f.estimated_difference is not None else None,
             }
             for f in findings
         ],
@@ -301,8 +335,12 @@ def download_report(audit_id: str, user_id: str = "anonymous", db: Session = Dep
 
 
 @router.get("/{audit_id}/appeal")
-def generate_appeal(audit_id: str, user_id: str = "anonymous", db: Session = Depends(get_db)):
-    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user_id).first()
+def generate_appeal(
+    audit_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_user_db),
+):
+    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user.id).first()
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
 
@@ -313,7 +351,7 @@ def generate_appeal(audit_id: str, user_id: str = "anonymous", db: Session = Dep
         audit_id=audit_id,
         audit={},
         findings=[
-            {"title": f.title, "description": f.description, "estimated_difference": float(f.estimated_difference) if f.estimated_difference else None}
+            {"title": f.title, "description": f.description,             "estimated_difference": float(f.estimated_difference) if f.estimated_difference is not None else None}
             for f in findings
         ],
         patient_name=audit.patient_name or "Patient",
@@ -328,19 +366,39 @@ def generate_appeal(audit_id: str, user_id: str = "anonymous", db: Session = Dep
     return FileResponse(path, media_type="application/pdf", filename=f"hisaab_appeal_{audit_id}.pdf")
 
 
+def _remove_audit_file(path: str, allowed_directory: str) -> None:
+    absolute_path = os.path.abspath(path)
+    if os.path.dirname(absolute_path) != os.path.abspath(allowed_directory):
+        logger.error("Refusing to delete audit file outside its storage directory: %s", path)
+        raise HTTPException(status_code=500, detail="Could not safely remove an audit file")
+
+    try:
+        os.remove(absolute_path)
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        logger.exception("Could not remove audit file: %s", absolute_path)
+        raise HTTPException(status_code=500, detail="Could not remove an audit file") from exc
+
+
 @router.delete("/{audit_id}")
-def delete_audit(audit_id: str, user_id: str = "anonymous", db: Session = Depends(get_db)):
-    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user_id).first()
+def delete_audit(
+    audit_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_user_db),
+):
+    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user.id).first()
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
 
-    # Delete uploaded file
-    for fname in os.listdir(settings.UPLOAD_DIR):
-        if fname.startswith(f"{audit_id}_"):
-            try:
-                os.remove(os.path.join(settings.UPLOAD_DIR, fname))
-            except OSError:
-                pass
+    if os.path.isdir(settings.UPLOAD_DIR):
+        for fname in os.listdir(settings.UPLOAD_DIR):
+            if fname.startswith(f"{audit_id}."):
+                _remove_audit_file(os.path.join(settings.UPLOAD_DIR, fname), settings.UPLOAD_DIR)
+
+    reports = db.query(Report).filter(Report.audit_id == audit_id).all()
+    for report in reports:
+        _remove_audit_file(report.storage_path, settings.REPORT_DIR)
 
     db.delete(audit)
     db.commit()

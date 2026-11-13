@@ -5,10 +5,11 @@ from typing import List
 class Settings(BaseSettings):
     # Gemini AI
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-1.5-flash"
+    GEMINI_MODEL: str = "gemini-3.5-flash"
 
     # Supabase
     SUPABASE_URL: str = ""
+    SUPABASE_JWT_SECRET: str = ""
     SUPABASE_ANON_KEY: str = ""
     SUPABASE_SERVICE_ROLE_KEY: str = ""
 
@@ -22,7 +23,7 @@ class Settings(BaseSettings):
 
     # Backend
     BACKEND_URL: str = "http://localhost:8000"
-    CORS_ORIGINS: str = "http://localhost:5173"
+    CORS_ORIGINS: str = "http://localhost:5000,http://localhost:5173"
 
     class Config:
         env_file = ".env"

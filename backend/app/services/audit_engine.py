@@ -69,8 +69,8 @@ class AuditEngine:
 
         return {
             "extraction_method": extraction.extraction_method,
-            "original_total": float(original_total) if original_total else None,
-            "calculated_total": float(calculated_total) if calculated_total else None,
+            "original_total": float(original_total) if original_total is not None else None,
+            "calculated_total": float(calculated_total) if calculated_total is not None else None,
             "arithmetic": arithmetic,
             "duplicates": duplicates,
             "date_checks": date_checks,
@@ -214,7 +214,7 @@ class AuditEngine:
                 same_total = total is not None and prev.get("total") is not None and total == prev["total"]
 
                 if same_name and same_total:
-                    dup_amount = float(total) if total else 0.0
+                    dup_amount = float(total) if total is not None else 0.0
                     findings.append({
                         "finding_type": "DUPLICATE",
                         "title": f"Possible duplicate charge: {item.item_name or 'item'}",
@@ -227,7 +227,7 @@ class AuditEngine:
                         "severity": "MEDIUM",
                         "confidence": 0.7,
                         "expected_value": None,
-                        "actual_value": float(total) if total else None,
+                        "actual_value": float(total) if total is not None else None,
                         "estimated_difference": dup_amount,
                         "status": "open",
                     })
@@ -274,12 +274,9 @@ class AuditEngine:
 
     def _check_dates(self, extraction: BillExtraction) -> Dict[str, Any]:
         findings = []
-        try:
-            admission = date.fromisoformat(extraction.admission_date) if extraction.admission_date else None
-            discharge = date.fromisoformat(extraction.discharge_date) if extraction.discharge_date else None
-            bill_dt = date.fromisoformat(extraction.bill_date) if extraction.bill_date else None
-        except (ValueError, TypeError):
-            admission = discharge = bill_dt = None
+        admission = extraction.admission_date
+        discharge = extraction.discharge_date
+        bill_dt = extraction.bill_date
 
         if admission and discharge:
             if discharge < admission:

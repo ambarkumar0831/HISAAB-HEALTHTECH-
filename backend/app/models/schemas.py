@@ -33,9 +33,9 @@ class BillExtraction(BaseModel):
     patient_name: Optional[str] = None
     patient_id: Optional[str] = None
     bill_number: Optional[str] = None
-    bill_date: Optional[str] = None
-    admission_date: Optional[str] = None
-    discharge_date: Optional[str] = None
+    bill_date: Optional[date] = None
+    admission_date: Optional[date] = None
+    discharge_date: Optional[date] = None
     items: List[BillItemExtract] = Field(default_factory=list)
     subtotal: Optional[float] = None
     discount: Optional[float] = None

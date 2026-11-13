@@ -91,19 +91,25 @@ export default function History() {
                   <td className="px-6 py-4">
                     <StatusBadge status={a.status} />
                   </td>
-                  <td className="px-6 py-4 text-right">
-                    <Link
-                      to={`/audit/${a.id}`}
-                      className="text-deep-sage text-sm font-medium hover:underline flex items-center gap-1"
-                    >
-                      View <FileText size={14} />
-                    </Link>
-                    <button
-                      onClick={() => handleDelete(a.id)}
-                      className="ml-4 text-red-500 text-sm hover:text-red-700"
-                    >
-                      <Trash2 size={14} />
-                    </button>
+                  <td className="px-6 py-4">
+                    <div className="flex items-center justify-end gap-2 whitespace-nowrap">
+                      <Link
+                        to={`/audit/${a.id}`}
+                        className="inline-flex min-h-9 items-center gap-2 rounded-xl border border-[#dcebe0] bg-[#f3f8f4] px-3 text-xs font-semibold text-deep-sage shadow-sm transition hover:border-[#bdd6c4] hover:bg-[#eaf4ed] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-deep-sage focus-visible:ring-offset-2"
+                      >
+                        <FileText size={14} />
+                        View
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(a.id)}
+                        aria-label={`Delete audit for ${a.hospital_name || a.bill_number || "this bill"}`}
+                        title="Delete audit"
+                        className="inline-flex h-9 w-9 items-center justify-center rounded-xl border border-rose-100 bg-rose-50/70 text-rose-600 transition hover:border-rose-200 hover:bg-rose-100 hover:text-rose-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 focus-visible:ring-offset-2"
+                      >
+                        <Trash2 size={15} />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

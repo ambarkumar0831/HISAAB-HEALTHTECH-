@@ -100,6 +100,22 @@ def test_rounding_difference_treated_as_match():
     assert len(arith) == 0
 
 
+def test_zero_totals_are_preserved():
+    """Zero is a valid amount, not a missing value."""
+    engine = AuditEngine()
+    extraction = _extraction(
+        [BillItemExtract(item_name="No-charge item", quantity=1, unit_price=0, total=0)],
+        grand_total=0,
+        subtotal=0,
+    )
+
+    result = engine.audit(extraction)
+
+    assert result["original_total"] == 0.0
+    assert result["calculated_total"] == 0.0
+    assert result["arithmetic"]["item_checks"][0]["expected_total"] == 0.0
+
+
 def test_exact_duplicate_flagged():
     """Same item name + same total = possible duplicate."""
     engine = AuditEngine()

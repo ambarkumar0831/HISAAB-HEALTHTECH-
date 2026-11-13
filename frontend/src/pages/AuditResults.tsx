@@ -1,250 +1,390 @@
-import { useEffect, useState } from "react";
-import { useParams, Link, useNavigate } from "react-router-dom";
+import { useCallback, useEffect, useState } from "react";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import {
-  FileText,
-  Mail,
-  RefreshCw,
-  Edit3,
+  ArrowLeft,
   Download,
-  ShieldAlert,
-  Banknote,
-  Clock,
+  FileText,
   Loader2,
+  Mail,
+  MessageCircle,
+  RefreshCw,
+  ShieldAlert,
 } from "lucide-react";
 import { auditApi } from "../services/api";
 import type { AuditDetailOut, AuditFinding, BillItemOut } from "../types";
 import StatusBadge from "../components/StatusBadge";
+
+const formatMoney = (value: number | null | undefined) =>
+  value == null
+    ? "—"
+    : new Intl.NumberFormat("en-IN", {
+        style: "currency",
+        currency: "INR",
+        maximumFractionDigits: 2,
+      }).format(value);
+
+const formatDate = (value: string | null | undefined) => {
+  if (!value) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+};
+
+const findingLabels: Record<string, string> = {
+  ARITHMETIC: "Arithmetic",
+  DUPLICATE: "Possible duplicate",
+  BENCHMARK: "Benchmark",
+  DATE_CHECK: "Date check",
+  UNCLEAR_CHARGE: "Unclear charge",
+};
+
+const questionForFinding = (findingType: string) => {
+  const questions: Record<string, string> = {
+    ARITHMETIC: "Could you help me understand how this line amount was calculated?",
+    DUPLICATE: "Are these entries for separate services? Could you share the dates or details?",
+    BENCHMARK: "Could you confirm which rate or package applies to this service?",
+    DATE_CHECK: "Could you confirm the date and billing period for this entry?",
+    UNCLEAR_CHARGE: "Could you provide an itemized description of this charge?",
+  };
+  return questions[findingType] || "Could you help me understand this item in my bill?";
+};
 
 export default function AuditResults() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const [audit, setAudit] = useState<AuditDetailOut | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [downloading, setDownloading] = useState<"report" | "appeal" | null>(null);
+  const [rerunning, setRerunning] = useState(false);
+
+  const loadAudit = useCallback(async () => {
+    if (!id) {
+      setLoadError("No audit was selected.");
+      setLoading(false);
+      return;
+    }
+
+    setLoading(true);
+    setLoadError(null);
+    try {
+      setAudit(await auditApi.get(id));
+    } catch (requestError: unknown) {
+      setLoadError(requestError instanceof Error ? requestError.message : "Could not load this audit.");
+    } finally {
+      setLoading(false);
+    }
+  }, [id]);
 
   useEffect(() => {
-    if (!id) return;
-    auditApi.get(id).then(setAudit).catch(setError).finally(() => setLoading(false));
-  }, [id]);
+    void loadAudit();
+  }, [loadAudit]);
+
+  const downloadFile = async (type: "report" | "appeal") => {
+    if (!audit) return;
+    setActionError(null);
+    setDownloading(type);
+    try {
+      const file = type === "report" ? await auditApi.report(audit.id) : await auditApi.appeal(audit.id);
+      const objectUrl = URL.createObjectURL(file);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = `hisaab_${type === "report" ? "audit" : "appeal"}_${audit.id}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    } catch (downloadError: unknown) {
+      setActionError(downloadError instanceof Error ? downloadError.message : "Could not download the file.");
+    } finally {
+      setDownloading(null);
+    }
+  };
+
+  const rerunAudit = async () => {
+    if (!audit || rerunning) return;
+    setActionError(null);
+    setRerunning(true);
+    try {
+      await auditApi.analyze(audit.id);
+      setAudit(await auditApi.get(audit.id));
+    } catch (rerunError: unknown) {
+      setActionError(rerunError instanceof Error ? rerunError.message : "Could not rerun this review.");
+    } finally {
+      setRerunning(false);
+    }
+  };
 
   if (loading) {
     return (
-      <div className="flex flex-col items-center justify-center h-96">
-        <Loader2 className="w-8 h-8 animate-spin text-deep-sage mb-3" />
-        <p className="text-slate-500">Loading audit...</p>
+      <div className="flex h-96 flex-col items-center justify-center">
+        <Loader2 className="mb-3 h-8 w-8 animate-spin text-deep-sage" />
+        <p className="text-sm text-slate-500">Loading your review…</p>
       </div>
     );
   }
-  if (error || !audit) {
+
+  if (loadError || !audit) {
     return (
-      <div className="text-center py-20">
-        <p className="text-red-600">{error || "Audit not found"}</p>
-        <Link to="/dashboard" className="mt-4 btn-primary">
-          Back to Dashboard
-        </Link>
+      <div className="mx-auto max-w-xl rounded-[1.7rem] border border-[#e4ece5] bg-white px-6 py-12 text-center shadow-sm">
+        <p className="font-serif text-xl font-bold text-dark-teal">We couldn&apos;t open this review</p>
+        <p role="alert" className="mt-2 text-sm text-slate-600">{loadError || "Audit not found."}</p>
+        <div className="mt-6 flex flex-wrap justify-center gap-3">
+          <button type="button" onClick={() => void loadAudit()} className="btn-outline justify-center">
+            <RefreshCw size={15} /> Try again
+          </button>
+          <Link to="/dashboard" className="btn-primary justify-center">Back to dashboard</Link>
+        </div>
       </div>
     );
   }
 
   const items = audit.bill_items || [];
   const findings = audit.findings || [];
-
-  const confirmedArith = findings.filter((f) => f.finding_type === "ARITHMETIC").length;
-  const duplicates = findings.filter((f) => f.finding_type === "DUPLICATE").length;
-  const benchmarks = findings.filter((f) => f.finding_type === "BENCHMARK").length;
-  const unclear = findings.filter((f) => f.finding_type === "UNCLEAR_CHARGE").length;
+  const counts = findings.reduce<Record<string, number>>((accumulator, finding) => {
+    accumulator[finding.finding_type] = (accumulator[finding.finding_type] || 0) + 1;
+    return accumulator;
+  }, {});
+  const totalDifference =
+    audit.original_total != null && audit.calculated_total != null
+      ? Math.abs(audit.original_total - audit.calculated_total)
+      : null;
 
   return (
-    <div className="max-w-5xl mx-auto space-y-8">
-      {/* Header */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-2">
-        <div>
-          <Link to="/dashboard" className="text-sm text-deep-sage hover:underline mb-2 inline-block">
-            ← Back to Dashboard
-          </Link>
-          <h1 className="text-3xl font-serif font-bold text-dark-teal">Audit Results</h1>
-          <p className="text-slate-600 mt-1">
-            Bill <span className="font-mono text-deep-sage">{audit.bill_number || "—"}</span> •{" "}
-            {audit.hospital_name || "Hospital"}
-          </p>
+    <div className="mx-auto max-w-6xl space-y-6">
+      <header className="rounded-[1.8rem] border border-[#e4ece5] bg-white p-5 shadow-[0_18px_55px_-46px_rgba(18,59,59,0.5)] sm:p-7">
+        <div className="flex flex-col justify-between gap-5 lg:flex-row lg:items-start">
+          <div className="min-w-0">
+            <Link to="/dashboard" className="inline-flex items-center gap-1.5 text-xs font-semibold text-deep-sage transition hover:text-dark-teal">
+              <ArrowLeft size={14} /> Back to dashboard
+            </Link>
+            <div className="mt-4 flex flex-wrap items-center gap-3">
+              <h1 className="font-serif text-3xl font-bold tracking-tight text-dark-teal sm:text-4xl">Your bill review</h1>
+              <StatusBadge status={findings.length > 0 ? "Needs Review" : "Completed"} />
+            </div>
+            <p className="mt-2 text-sm text-slate-600">
+              {audit.hospital_name || "Hospital"} <span className="mx-1.5 text-slate-300">·</span>
+              Bill <span className="font-mono text-deep-sage">{audit.bill_number || "—"}</span>
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => void downloadFile("report")}
+              disabled={downloading !== null}
+              className="btn-outline min-h-10 justify-center text-xs disabled:cursor-wait disabled:opacity-60"
+            >
+              <Download size={15} />
+              {downloading === "report" ? "Preparing…" : "Download report"}
+            </button>
+            <button
+              type="button"
+              onClick={() => void downloadFile("appeal")}
+              disabled={downloading !== null}
+              className="btn-primary min-h-10 justify-center text-xs disabled:cursor-wait disabled:opacity-60"
+            >
+              <Mail size={15} />
+              {downloading === "appeal" ? "Preparing…" : "Draft questions PDF"}
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          <Link
-            to={auditApi.report(audit.id)}
-            className="btn-outline flex items-center gap-2 text-sm"
-          >
-            <Download size={16} /> Download PDF
-          </Link>
-          <Link
-            to={auditApi.appeal(audit.id)}
-            className="btn-primary text-sm flex items-center gap-2"
-          >
-            <Mail size={16} /> Appeal Letter
-          </Link>
-        </div>
-      </div>
+        <p className="mt-5 rounded-xl border border-[#e7eee7] bg-[#f7faf6] px-4 py-3 text-xs leading-5 text-slate-600">
+          These automated checks are prompts to verify—not proof of an error or wrongdoing. Compare extracted details with the original bill.
+        </p>
+      </header>
 
-      {error && (
-        <div className="rounded-lg bg-red-50 p-4 border border-red-100">
-          <p className="text-sm text-red-700">{error}</p>
+      {actionError && (
+        <div role="alert" className="rounded-xl border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {actionError}
         </div>
       )}
 
-      {/* Summary */}
-      <div className="grid md:grid-cols-4 gap-4">
-        <div className="card p-5">
-          <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Total Billed</p>
-          <p className="text-2xl font-serif font-bold text-dark-teal mt-1">
-            ₹{audit.original_total?.toFixed(2) || "—"}
-          </p>
+      <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4" aria-label="Review summary">
+        <div className="rounded-[1.4rem] border border-[#e4ece5] bg-white p-5">
+          <p className="text-[10px] font-bold uppercase tracking-[0.13em] text-slate-500">Total shown on bill</p>
+          <p className="mt-2 font-serif text-2xl font-bold text-dark-teal">{formatMoney(audit.original_total)}</p>
         </div>
-        <div className="card p-5">
-          <p className="text-xs font-medium text-slate-500 uppercase tracking-wider">Calculated</p>
-          <p className="text-2xl font-serif font-bold text-dark-teal mt-1">
-            ₹{audit.calculated_total?.toFixed(2) || "—"}
-          </p>
+        <div className="rounded-[1.4rem] border border-[#e4ece5] bg-white p-5">
+          <p className="text-[10px] font-bold uppercase tracking-[0.13em] text-slate-500">Calculated from line items</p>
+          <p className="mt-2 font-serif text-2xl font-bold text-dark-teal">{formatMoney(audit.calculated_total)}</p>
         </div>
-        <div className="card p-5 bg-red-50 border-red-100">
-          <p className="text-xs font-medium text-red-700 uppercase tracking-wider">Arithmetic Issues</p>
-          <p className="text-2xl font-serif font-bold text-red-700 mt-1">{confirmedArith}</p>
+        <div className={`rounded-[1.4rem] border p-5 ${totalDifference != null && totalDifference > 0.01 ? "border-amber-100 bg-amber-50/70" : "border-[#e4ece5] bg-white"}`}>
+          <p className="text-[10px] font-bold uppercase tracking-[0.13em] text-slate-500">Difference to understand</p>
+          <p className="mt-2 font-serif text-2xl font-bold text-dark-teal">{formatMoney(totalDifference)}</p>
         </div>
-        <div className="card p-5 bg-amber-50 border-amber-100">
-          <p className="text-xs font-medium text-amber-700 uppercase tracking-wider">Possible Duplicates</p>
-          <p className="text-2xl font-serif font-bold text-amber-700 mt-1">{duplicates}</p>
+        <div className={`rounded-[1.4rem] border p-5 ${findings.length > 0 ? "border-[#dfeae0] bg-[#f3f8f2]" : "border-[#e4ece5] bg-white"}`}>
+          <p className="text-[10px] font-bold uppercase tracking-[0.13em] text-slate-500">Review prompts</p>
+          <p className="mt-2 font-serif text-2xl font-bold text-dark-teal">{findings.length}</p>
         </div>
-      </div>
+      </section>
 
-      {/* Findings */}
-      <div className="grid lg:grid-cols-3 gap-8">
-        <div className="lg:col-span-2 space-y-6">
-          <h2 className="text-lg font-serif font-bold text-dark-teal mb-2 flex items-center gap-2">
-            <FileText size={18} /> Bill Items
-          </h2>
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm border-collapse border border-slate-100">
+      {totalDifference != null && (
+        <p className="-mt-3 px-1 text-[11px] leading-5 text-slate-500">
+          The calculated amount uses quantities and unit prices that could be extracted. Tax, discounts, or other charges may explain a difference; check the original bill before drawing conclusions.
+        </p>
+      )}
+
+      <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(300px,0.85fr)]">
+        <section className="min-w-0 rounded-[1.7rem] border border-[#e4ece5] bg-white p-5 shadow-[0_18px_55px_-48px_rgba(18,59,59,0.45)] sm:p-6">
+          <div className="flex items-start gap-3">
+            <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[#eaf4ed] text-deep-sage">
+              <FileText size={19} />
+            </span>
+            <div>
+              <h2 className="font-serif text-xl font-bold text-dark-teal">Extracted bill items</h2>
+              <p className="mt-1 text-xs leading-5 text-slate-500">
+                Review the extracted amounts against the original document. “Not compared” means details were missing for that calculation.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-5 overflow-x-auto rounded-xl border border-[#e8eee8]">
+            <table className="w-full min-w-[690px] border-collapse text-sm">
               <thead>
-                <tr className="bg-slate-50 text-left text-slate-500 border-b border-slate-100">
-                  <th className="px-4 py-3 font-medium">Item</th>
-                  <th className="px-4 py-3 font-medium text-right">Qty</th>
-                  <th className="px-4 py-3 font-medium text-right">Unit Price</th>
-                  <th className="px-4 py-3 font-medium text-right">Billed</th>
-                  <th className="px-4 py-3 font-medium text-right">Expected</th>
-                  <th className="px-4 py-3 font-medium text-right">Status</th>
+                <tr className="border-b border-[#e8eee8] bg-[#f7faf6] text-left text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                  <th className="px-3 py-3">Item</th>
+                  <th className="px-3 py-3 text-right">Qty</th>
+                  <th className="px-3 py-3 text-right">Unit price</th>
+                  <th className="px-3 py-3 text-right">Billed</th>
+                  <th className="px-3 py-3 text-right">Qty × price</th>
+                  <th className="px-3 py-3 text-right">Check</th>
                 </tr>
               </thead>
               <tbody>
-                {items.map((it: BillItemOut) => {
-                  const billed = it.billed_total ?? 0;
-                  const expected = it.expected_total ?? 0;
-                  const mismatch = Math.abs(billed - expected) > 0.01;
+                {items.map((item: BillItemOut) => {
+                  const mismatch =
+                    item.billed_total != null &&
+                    item.expected_total != null &&
+                    Math.abs(item.billed_total - item.expected_total) > 0.01;
+                  const status = item.is_flagged || mismatch
+                    ? "Check total"
+                    : item.expected_total == null
+                      ? "Not compared"
+                      : "Matches";
+                  const statusStyle = status === "Check total"
+                    ? "border-amber-200 bg-amber-50 text-amber-800"
+                    : status === "Matches"
+                      ? "border-emerald-100 bg-emerald-50 text-emerald-800"
+                      : "border-slate-200 bg-slate-50 text-slate-600";
+
                   return (
-                    <tr key={it.id} className="border-b border-slate-100 hover:bg-slate-50/50">
-                      <td className="px-4 py-3 font-medium text-slate-800">
-                        {it.description || "Unidentified item"}
+                    <tr key={item.id} className="border-b border-[#edf1ed] last:border-0">
+                      <td className="max-w-[240px] px-3 py-3 font-medium text-slate-800">
+                        <span className="block truncate">{item.description || "Unidentified item"}</span>
+                        {item.category && <span className="mt-0.5 block text-[10px] font-normal text-slate-500">{item.category}</span>}
                       </td>
-                      <td className="px-4 py-3 text-right text-slate-600">
-                        {it.quantity?.toString() || "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right text-slate-600">
-                        {it.unit_price != null ? `₹${it.unit_price}` : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right text-slate-600 font-medium">
-                        {billed != null ? `₹${billed}` : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right text-slate-600">
-                        {expected != null ? `₹${expected}` : "—"}
-                      </td>
-                      <td className="px-4 py-3 text-right">
-                        <StatusBadge status={mismatch ? "Mismatch" : "Verified"} />
+                      <td className="px-3 py-3 text-right text-slate-600">{item.quantity ?? "—"}</td>
+                      <td className="px-3 py-3 text-right text-slate-600">{formatMoney(item.unit_price)}</td>
+                      <td className="px-3 py-3 text-right font-medium text-slate-700">{formatMoney(item.billed_total)}</td>
+                      <td className="px-3 py-3 text-right text-slate-600">{formatMoney(item.expected_total)}</td>
+                      <td className="px-3 py-3 text-right">
+                        <span className={`inline-flex whitespace-nowrap rounded-full border px-2.5 py-1 text-[10px] font-semibold ${statusStyle}`}>
+                          {status}
+                        </span>
                       </td>
                     </tr>
                   );
                 })}
                 {items.length === 0 && (
-                  <tr><td colSpan={6} className="px-4 py-8 text-center text-slate-500">No items extracted.</td></tr>
+                  <tr>
+                    <td colSpan={6} className="px-4 py-10 text-center text-sm text-slate-500">
+                      No bill items were extracted. Try rerunning the review or check the source document.
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>
           </div>
-        </div>
+        </section>
 
-        <div className="space-y-6">
-          <h2 className="text-lg font-serif font-bold text-dark-teal mb-2 flex items-center gap-2">
-            <ShieldAlert size={18} /> Findings
-          </h2>
-          <div className="grid md:grid-cols-2 gap-3">
-            <div className="p-3 rounded-lg bg-white border border-slate-100">
-              <p className="text-xs font-medium text-slate-500 uppercase">Arithmetic</p>
-              <p className="text-xl font-bold text-red-600">{confirmedArith}</p>
+        <section className="space-y-4">
+          <div className="rounded-[1.7rem] border border-[#e4ece5] bg-white p-5 shadow-[0_18px_55px_-48px_rgba(18,59,59,0.45)] sm:p-6">
+            <div className="flex items-center gap-2.5">
+              <ShieldAlert size={18} className="text-deep-sage" />
+              <h2 className="font-serif text-xl font-bold text-dark-teal">Review prompts</h2>
             </div>
-            <div className="p-3 rounded-lg bg-white border border-slate-100">
-              <p className="text-xs font-medium text-slate-500 uppercase">Duplicates</p>
-              <p className="text-xl font-bold text-amber-600">{duplicates}</p>
-            </div>
-            <div className="p-3 rounded-lg bg-white border border-slate-100">
-              <p className="text-xs font-medium text-slate-500 uppercase">Benchmark</p>
-              <p className="text-xl font-bold text-purple-600">{benchmarks}</p>
-            </div>
-            <div className="p-3 rounded-lg bg-white border border-slate-100">
-              <p className="text-xs font-medium text-slate-500 uppercase">Unclear</p>
-              <p className="text-xl font-bold text-slate-600">{unclear}</p>
-            </div>
-          </div>
 
-          <div className="space-y-3">
             {findings.length > 0 ? (
-              findings.map((f: AuditFinding) => (
-                <div key={f.id} className="p-4 rounded-lg bg-white border border-slate-100 shadow-sm">
-                  <div className="flex items-start justify-between mb-1">
-                    <h4 className="font-semibold text-dark-teal text-sm">{f.title}</h4>
-                    <StatusBadge status={f.severity || "MEDIUM"} />
-                  </div>
-                  <p className="text-xs text-slate-600 mt-1 leading-relaxed">
-                    {f.description || ""}
-                  </p>
-                  {f.estimated_difference != null && (
-                    <p className="text-xs mt-2 text-deep-sage font-medium">
-                      Estimated difference: ₹{f.estimated_difference}
-                    </p>
-                  )}
+              <>
+                <div className="mt-4 flex flex-wrap gap-2">
+                  {Object.entries(findingLabels).map(([type, label]) => (
+                    <span key={type} className="rounded-full bg-[#f3f6f2] px-2.5 py-1 text-[10px] font-medium text-slate-600">
+                      {label}: {counts[type] || 0}
+                    </span>
+                  ))}
                 </div>
-              ))
+                <div className="mt-4 space-y-3">
+                  {findings.map((finding: AuditFinding) => (
+                    <article key={finding.id} className="rounded-2xl border border-[#e8eee8] bg-[#fcfdfb] p-4">
+                      <div className="flex flex-wrap items-start justify-between gap-2">
+                        <div>
+                          <span className="text-[9px] font-bold uppercase tracking-[0.12em] text-deep-sage">
+                            {findingLabels[finding.finding_type] || "Review"}
+                          </span>
+                          <h3 className="mt-1 text-sm font-semibold leading-5 text-dark-teal">{finding.title}</h3>
+                        </div>
+                        <StatusBadge status={finding.severity || "MEDIUM"} />
+                      </div>
+                      {finding.description && (
+                        <p className="mt-2 text-xs leading-5 text-slate-600">{finding.description}</p>
+                      )}
+                      {finding.estimated_difference != null && (
+                        <p className="mt-2 text-xs font-semibold text-slate-700">
+                          Amount to clarify: {formatMoney(finding.estimated_difference)}
+                        </p>
+                      )}
+                      <div className="mt-3 rounded-xl bg-[#f1f6f1] p-3">
+                        <p className="flex items-start gap-2 text-[11px] leading-5 text-slate-700">
+                          <MessageCircle size={14} className="mt-0.5 shrink-0 text-deep-sage" />
+                          <span><strong>One way to ask:</strong> {questionForFinding(finding.finding_type)}</span>
+                        </p>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </>
             ) : (
-              <div className="p-6 text-center text-slate-500 border border-dashed rounded-xl">
-                No findings. The bill looks consistent.
+              <div className="mt-4 rounded-2xl border border-dashed border-[#dce7dc] bg-[#f8faf7] p-5">
+                <p className="text-sm font-semibold text-dark-teal">No review prompts were raised</p>
+                <p className="mt-1.5 text-xs leading-5 text-slate-600">
+                  This does not guarantee every bill detail is correct. Compare the extracted items with the original bill.
+                </p>
               </div>
             )}
-          </div>
 
-          <button
-            onClick={() => navigate("/dashboard")}
-            className="mt-2 w-full btn-outline text-sm py-2"
-          >
-            <RefreshCw size={16} /> Re-run Audit
-          </button>
-        </div>
+            <button
+              type="button"
+              onClick={() => void rerunAudit()}
+              disabled={rerunning}
+              className="btn-outline mt-5 min-h-10 w-full justify-center text-xs disabled:cursor-wait disabled:opacity-60"
+            >
+              {rerunning ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
+              {rerunning ? "Checking again…" : "Rerun checks"}
+            </button>
+          </div>
+        </section>
       </div>
 
-      {/* Extraction info */}
-      <div className="card p-6 bg-misty-blue/30 border-misty-blue/50">
-        <h3 className="font-serif text-lg text-dark-teal mb-3">Extraction Details</h3>
-        <div className="grid md:grid-cols-3 gap-4 text-sm">
+      <section className="rounded-[1.7rem] border border-[#e4ece5] bg-[#f5f8f4] p-5 sm:p-6">
+        <h2 className="font-serif text-lg font-bold text-dark-teal">Review details</h2>
+        <div className="mt-4 grid gap-4 sm:grid-cols-3">
           <div>
-            <p className="text-xs text-slate-500 uppercase">Method</p>
-            <p className="font-mono text-xs bg-white px-2 py-1 rounded text-deep-sage">
-              {audit.extraction_method}
-            </p>
+            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Extraction method</p>
+            <p className="mt-1 text-sm font-medium text-slate-700">{audit.extraction_method || "—"}</p>
           </div>
           <div>
-            <p className="text-xs text-slate-500 uppercase">Status</p>
-            <StatusBadge status={audit.status} />
+            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Processing status</p>
+            <div className="mt-1"><StatusBadge status={audit.status} /></div>
           </div>
           <div>
-            <p className="text-xs text-slate-500 uppercase">Date</p>
-            <p className="text-slate-600">{audit.created_at || "—"}</p>
+            <p className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Created</p>
+            <p className="mt-1 text-sm text-slate-700">{formatDate(audit.created_at)}</p>
           </div>
         </div>
-      </div>
+        <p className="mt-5 border-t border-[#e2eae1] pt-4 text-[11px] leading-5 text-slate-500">
+          Automated extraction can miss or misread details. Confirm all amounts and descriptions against the original bill before contacting your provider.
+        </p>
+      </section>
     </div>
   );
 }

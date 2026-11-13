@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
-import { BrowserRouter, Routes, Route, useLocation } from "react-router-dom";
+import { BrowserRouter, Routes, Route, useLocation, Navigate, Outlet } from "react-router-dom";
 import Lenis from "lenis";
+import { Loader2 } from "lucide-react";
 import Landing from "./pages/Landing";
 import Dashboard from "./pages/Dashboard";
 import Upload from "./pages/Upload";
@@ -13,13 +14,34 @@ import Login from "./pages/Login";
 import GetStarted from "./pages/GetStarted";
 import DemoAudit from "./pages/DemoAudit";
 import Layout from "./components/Layout";
+import { AuthProvider, useAuth } from "./contexts/AuthContext";
+
+function ProtectedWorkspace() {
+  const { session, loading } = useAuth();
+  const location = useLocation();
+
+  if (loading) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-mint-50">
+        <Loader2 className="h-8 w-8 animate-spin text-deep-sage" aria-label="Checking your session" />
+      </div>
+    );
+  }
+
+  if (!session) {
+    return <Navigate to="/login" replace state={{ from: location }} />;
+  }
+
+  return <Outlet />;
+}
 
 function ScrollExperience() {
   const { pathname } = useLocation();
 
   useEffect(() => {
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const lenis = reducedMotion
+    const nativeScroll = reducedMotion || window.matchMedia("(pointer: coarse)").matches;
+    const lenis = nativeScroll
       ? null
       : new Lenis({
           autoRaf: true,
@@ -98,26 +120,30 @@ function ScrollProgress() {
 export default function App() {
   return (
     <BrowserRouter>
-      <ScrollExperience />
-      <ScrollProgress />
-      <Routes>
-        {/* Public routes */}
-        <Route path="/" element={<Landing />} />
-        <Route path="/login" element={<Login />} />
-        <Route path="/get-started" element={<GetStarted />} />
+      <AuthProvider>
+        <ScrollExperience />
+        <ScrollProgress />
+        <Routes>
+          <Route path="/" element={<Landing />} />
+          <Route path="/sample" element={<DemoAudit />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="/signup" element={<GetStarted />} />
+          <Route path="/get-started" element={<GetStarted />} />
 
-        {/* App routes (no auth required — demo mode) */}
-        <Route element={<Layout />}>
-          <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/about" element={<About />} />
-          <Route path="/upload" element={<Upload />} />
-          <Route path="/audit/:id" element={<AuditResults />} />
-          <Route path="/history" element={<History />} />
-          <Route path="/benchmarks" element={<Benchmarks />} />
-          <Route path="/settings" element={<Settings />} />
-          <Route path="/demo-audit" element={<DemoAudit />} />
-        </Route>
-      </Routes>
+          <Route element={<ProtectedWorkspace />}>
+            <Route element={<Layout />}>
+              <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/about" element={<About />} />
+              <Route path="/upload" element={<Upload />} />
+              <Route path="/audit/:id" element={<AuditResults />} />
+              <Route path="/history" element={<History />} />
+              <Route path="/benchmarks" element={<Benchmarks />} />
+              <Route path="/settings" element={<Settings />} />
+              <Route path="/demo-audit" element={<DemoAudit />} />
+            </Route>
+          </Route>
+        </Routes>
+      </AuthProvider>
     </BrowserRouter>
   );
 }
