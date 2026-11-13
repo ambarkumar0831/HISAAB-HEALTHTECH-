@@ -8,7 +8,15 @@ import type {
 } from "../types";
 import { supabase } from "./supabase";
 
-const API_BASE = import.meta.env.DEV ? "" : import.meta.env.VITE_API_BASE || "";
+const configuredApiBase = import.meta.env.VITE_API_BASE?.trim();
+const normalizedApiBase = configuredApiBase
+  ? (
+      /^https?:\/\//i.test(configuredApiBase)
+        ? configuredApiBase
+        : `https://${configuredApiBase}`
+    ).replace(/\/+$/, "")
+  : "";
+const API_BASE = import.meta.env.DEV ? "" : normalizedApiBase;
 const API_LOCATION = import.meta.env.DEV
   ? "the local backend through Vite's proxy at http://127.0.0.1:8000"
   : API_BASE || "the same origin";

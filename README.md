@@ -118,21 +118,22 @@ The current MVP stores uploaded bills and generated PDFs on the backend’s loca
 
 ### Free demo deployment
 
-The frontend can be deployed from `frontend/` on Vercel. The FastAPI backend can be deployed from the root `render.yaml` Blueprint on Render. Set these Vercel environment variables for Production:
+The root `render.yaml` Blueprint creates a public FastAPI Web Service and a separate Vite Static Site on Render. The backend starts from `app.main:app` in `backend/`, binds to `0.0.0.0` and Render's assigned `PORT`, and exposes `/health`. The frontend build receives the backend host from the Blueprint and uses it for API requests.
 
-- `VITE_SUPABASE_URL`
-- `VITE_SUPABASE_ANON_KEY`
-- `VITE_API_BASE` — the deployed Render service URL, without a trailing slash
+Enter these values in Render's Environment settings when prompted:
 
-Set these Render environment variables when creating the Blueprint:
+- Backend Web Service:
+  - `DATABASE_URL` — a Supabase PostgreSQL connection string using `postgresql+psycopg://`
+  - `GEMINI_API_KEY`
+  - `SUPABASE_URL`
+  - `SUPABASE_JWT_SECRET` — add only if the Supabase project signs access tokens with HS256
+- Frontend Static Site:
+  - `VITE_SUPABASE_URL`
+  - `VITE_SUPABASE_ANON_KEY` — the public anon/publishable key, never a service-role key
 
-- `DATABASE_URL` — the Supabase PostgreSQL connection string using `postgresql+psycopg://`
-- `GEMINI_API_KEY`
-- `SUPABASE_URL`
-- `SUPABASE_JWT_SECRET` — only required if the Supabase project signs access tokens with HS256
-- `CORS_ORIGINS` — the exact Vercel production origin and, if needed, `http://localhost:5000`
+The Blueprint connects `VITE_API_BASE` to the backend host and `CORS_ORIGINS` to the frontend host. Add the deployed frontend URL to Supabase Authentication's Site URL and redirect URL allowlist after Render assigns it.
 
-After both services deploy, add the Vercel URL to Supabase Authentication’s Site URL and redirect URL allowlist. Render’s free service uses an ephemeral filesystem and spins down when idle; uploaded bills and generated reports can be lost on sleep, restart, or redeploy. Use synthetic data only. Do not use the free demo for real patient records or production.
+The backend stores uploaded bills and generated reports on its local filesystem. Render's free web service has ephemeral storage and may sleep when idle; uploads and reports can be lost on sleep, restart, or redeploy. The database must be external PostgreSQL (such as Supabase), not SQLite. Use fictional test bills only; do not use this demo for real patient records or production.
 
 ## Key Design Decisions
 
