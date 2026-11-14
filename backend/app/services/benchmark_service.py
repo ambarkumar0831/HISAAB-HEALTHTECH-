@@ -100,7 +100,7 @@ class BenchmarkService:
             "service_name": row.service_name,
             "normalized_service_name": row.normalized_service_name,
             "category": row.category,
-            "rate": float(row.rate) if row.rate else None,
+            "rate": float(row.rate) if row.rate is not None else None,
             "source_name": row.source_name,
             "source_url": row.source_url,
             "location": row.location,

@@ -67,8 +67,8 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-async function requestFile(input: string): Promise<Blob> {
-  const res = await authenticatedFetch(input);
+async function requestFile(input: string, init?: RequestInit): Promise<Blob> {
+  const res = await authenticatedFetch(input, init);
   if (!res.ok) return responseError(res, "Download");
   return res.blob();
 }
@@ -89,12 +89,21 @@ export const auditApi = {
       `/api/audits/${auditId}/extract`,
       { method: "POST" },
     ),
+  confirm: (auditId: string, extraction: BillExtraction) =>
+    request<{ audit_id: string; status: string }>(`/api/audits/${auditId}/confirm`, {
+      method: "PUT",
+      body: JSON.stringify(extraction),
+    }),
   analyze: (auditId: string) =>
     request<AuditResult>(`/api/audits/${auditId}/analyze`, { method: "POST" }),
   list: () => request<AuditOut[]>("/api/audits"),
   get: (auditId: string) => request<AuditDetailOut>(`/api/audits/${auditId}`),
   report: (auditId: string) => requestFile(`/api/audits/${auditId}/report`),
-  appeal: (auditId: string) => requestFile(`/api/audits/${auditId}/appeal`),
+  appeal: (auditId: string, questions: string[]) =>
+    requestFile(`/api/audits/${auditId}/appeal`, {
+      method: "POST",
+      body: JSON.stringify({ questions }),
+    }),
   delete: (auditId: string) =>
     request<{ message: string }>(`/api/audits/${auditId}`, { method: "DELETE" }),
   stats: () => request<DashboardStats>("/api/dashboard/stats"),

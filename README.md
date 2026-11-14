@@ -11,10 +11,11 @@ HISAAB is an AI-powered hospital bill auditing platform that helps patients unde
 Users upload a hospital bill (PDF, JPG, PNG). The application:
 1. Reads the bill using **Google Gemini API** (primary).
 2. Falls back to **Tesseract OCR** if Gemini extraction fails.
-3. Independently verifies calculations using a **Python audit engine**.
-4. Detects duplicate entries, arithmetic errors, and unclear charges.
-5. Compares charges against verified **benchmark rates** (PM-JAY, CGHS, state schedules).
-6. Generates an understandable audit report and a downloadable **grievance appeal letter** (PDF).
+3. Shows extracted line items and totals for the user to edit and confirm before analysis.
+4. Independently verifies complete calculations using a **Python audit engine**; missing values are left unchecked rather than assumed to be zero.
+5. Detects possible duplicate entries, arithmetic errors, and unclear charges as review prompts—not accusations.
+6. Compares up to five unit rates against one date-applicable, cited benchmark source when available; applicability to an individual case is not presumed.
+7. Generates an understandable audit report and a downloadable questions PDF with editable hospital questions.
 
 **Core philosophy:** We do not dispute medical care. We help patients understand and verify their hospital bills.
 
@@ -109,7 +110,7 @@ npm run dev -- --host 0.0.0.0 --port 5000
 1. Create or select a Supabase project. In **Authentication → URL Configuration**, set the local site URL and allow the callback URLs `http://localhost:5000/login` and `http://localhost:5173/login`. Keep email confirmation enabled.
 2. Copy the project URL and publishable/anon key into `frontend/.env.local`. These client values are public; never place a service-role key in the frontend.
 3. Copy the PostgreSQL URI from the project’s **Connect** dialog into `backend/.env` as `DATABASE_URL`, and set the same project URL as `SUPABASE_URL`. Use the session pooler if the direct connection is unavailable on your network. Change the URI scheme from `postgresql://` to `postgresql+psycopg://` so SQLAlchemy uses the installed PostgreSQL driver. Keep database credentials local. `SUPABASE_JWT_SECRET` is needed only for older projects using HS256 access tokens; projects using asymmetric signing keys are verified through Supabase’s JWKS endpoint.
-4. Start the backend once so SQLAlchemy creates the MVP tables, then run `supabase/migrations/20261113000000_hisaab_rls.sql` in the Supabase SQL Editor. Apply the migration before using real patient records. The API also checks audit ownership; the migration adds a database-level RLS layer.
+4. Start the backend once so SQLAlchemy creates the MVP tables, then run `supabase/migrations/20261113000000_hisaab_rls.sql` and `supabase/migrations/20261114000000_bill_review_confirmation.sql` in the Supabase SQL Editor, in that order. Apply both migrations before deploying this version. The API also checks audit ownership; the first migration adds a database-level RLS layer, and the second adds confirmed-extraction, calculation, and benchmark-evidence fields.
 5. Restart the frontend after changing `.env.local`, open `http://localhost:5000`, create an account, confirm the email, and sign in. Password recovery returns to `/login`.
 
 Benchmark writes are restricted to users whose trusted Supabase `app_metadata` contains `"hisaab_role": "admin"`. Do not assign roles through user-editable metadata or the browser client.
@@ -134,6 +135,14 @@ Enter these values in Render's Environment settings when prompted:
 The Blueprint connects `VITE_API_BASE` to the backend host and `CORS_ORIGINS` to the frontend host. Add the deployed frontend URL to Supabase Authentication's Site URL and redirect URL allowlist after Render assigns it.
 
 The backend stores uploaded bills and generated reports on its local filesystem. Render's free web service has ephemeral storage and may sleep when idle; uploads and reports can be lost on sleep, restart, or redeploy. The database must be external PostgreSQL (such as Supabase), not SQLite. Use fictional test bills only; do not use this demo for real patient records or production.
+
+### Vercel multi-service demo
+
+The root `vercel.json` configures one Vercel project with the FastAPI backend at `app.main:app` and the Vite frontend. Requests to `/api/*` and `/health` go to the backend; other routes go to the frontend. The frontend uses same-origin API requests, so leave `VITE_API_BASE` unset.
+
+Enter variables directly in Vercel's Environment Variables settings; do not upload a local `.env` file. Configure `DATABASE_URL`, `GEMINI_API_KEY`, and `SUPABASE_URL` for the backend service. Add `SUPABASE_JWT_SECRET` only if your Supabase project uses HS256 signing. Configure `VITE_SUPABASE_URL` and the public `VITE_SUPABASE_ANON_KEY` for the frontend. Never prefix private values with `VITE_`. Set the backend's `UPLOAD_DIR` and `REPORT_DIR` to writable temporary paths such as `/tmp/uploads` and `/tmp/reports`.
+
+Vercel's function filesystem is temporary: bill uploads and generated reports are not persistent, and uploads may not survive between separate invocations. The application's 10 MB upload setting may also exceed platform request limits. Treat this as a synthetic-bill demo only; use durable object storage and verify the platform's request limits before relying on uploads. Apply `supabase/migrations/20261114000000_bill_review_confirmation.sql` to the existing database before deploying this version.
 
 ## Key Design Decisions
 

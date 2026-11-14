@@ -54,6 +54,8 @@ def test_authenticated_patient_workflow(monkeypatch, tmp_path):
             admission_date="2025-01-01",
             discharge_date="2025-01-03",
             subtotal=200,
+            discount=0,
+            tax=0,
             grand_total=200,
             items=[
                 BillItemExtract(
@@ -84,14 +86,29 @@ def test_authenticated_patient_workflow(monkeypatch, tmp_path):
             assert extraction_response.status_code == 200
             assert extraction_response.json()["extraction"]["bill_date"] == "2025-01-03"
 
+            assert client.post(f"/api/audits/{audit_id}/analyze").status_code == 409
+            confirmed_extraction = extraction_response.json()["extraction"]
+            confirmed_extraction["subtotal"] = 300
+            confirmed_extraction["grand_total"] = 300
+            confirmed_extraction["items"][0]["quantity"] = 3
+            confirmed_extraction["items"][0]["total"] = 300
+            confirm_response = client.put(
+                f"/api/audits/{audit_id}/confirm",
+                json=confirmed_extraction,
+            )
+            assert confirm_response.status_code == 200
+            assert confirm_response.json()["status"] == "CONFIRMED"
+
             analysis_response = client.post(f"/api/audits/{audit_id}/analyze")
             assert analysis_response.status_code == 200
             assert analysis_response.json()["date_checks"]["stay_days"] == 2
-            assert analysis_response.json()["calculated_total"] == 200
+            assert analysis_response.json()["calculated_total"] == 300
 
             detail_response = client.get(f"/api/audits/{audit_id}")
             assert detail_response.status_code == 200
             assert detail_response.json()["bill_items"][0]["description"] == "Synthetic lab panel"
+            assert detail_response.json()["subtotal"] == 300
+            assert detail_response.json()["extraction_confirmed"] is True
 
             history_response = client.get("/api/audits")
             assert history_response.status_code == 200
@@ -107,6 +124,13 @@ def test_authenticated_patient_workflow(monkeypatch, tmp_path):
                 assert document_response.headers["content-type"] == "application/pdf"
                 assert document_response.content.startswith(b"%PDF")
 
+            custom_appeal_response = client.post(
+                f"/api/audits/{audit_id}/appeal",
+                json={"questions": ["Please explain this synthetic charge."]},
+            )
+            assert custom_appeal_response.status_code == 200
+            assert custom_appeal_response.content.startswith(b"%PDF")
+
             assert client.get("/api/benchmarks").status_code == 200
             benchmark_response = client.post(
                 "/api/benchmarks",
@@ -115,6 +139,8 @@ def test_authenticated_patient_workflow(monkeypatch, tmp_path):
                     "category": "laboratory",
                     "rate": 100,
                     "source_name": "Synthetic test data",
+                    "source_url": "https://example.test/synthetic-rates",
+                    "applicability_notes": "Example-only & not patient-specific.",
                     "effective_from": "2025-01-01",
                 },
             )
@@ -129,11 +155,27 @@ def test_authenticated_patient_workflow(monkeypatch, tmp_path):
                     "category": "laboratory",
                     "rate": 125,
                     "source_name": "Synthetic test data",
+                    "source_url": "https://example.test/synthetic-rates",
+                    "applicability_notes": "Example-only & not patient-specific.",
                     "effective_from": "2025-01-01",
                 },
             )
             assert updated_benchmark.status_code == 200
             assert updated_benchmark.json()["rate"] == 125
+            benchmark_analysis = client.post(f"/api/audits/{audit_id}/analyze")
+            assert benchmark_analysis.status_code == 200
+            benchmark_detail = client.get(f"/api/audits/{audit_id}").json()
+            assert benchmark_detail["benchmark_review"]["benchmarks_checked"] == 1
+            assert benchmark_detail["benchmark_review"]["source_url"] == "https://example.test/synthetic-rates"
+            benchmark_finding = next(
+                finding for finding in benchmark_detail["findings"]
+                if finding["finding_type"] == "BENCHMARK"
+            )
+            assert benchmark_finding["bill_item_id"] == benchmark_detail["bill_items"][0]["id"]
+            assert benchmark_finding["source_date"] == "2025-01-01"
+            cited_report = client.get(f"/api/audits/{audit_id}/report")
+            assert cited_report.status_code == 200
+            assert cited_report.content.startswith(b"%PDF")
             assert client.delete(f"/api/benchmarks/{benchmark_id}").status_code == 204
 
             assert client.delete(f"/api/audits/{audit_id}").status_code == 200

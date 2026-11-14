@@ -12,7 +12,7 @@ from app.core.config import settings
 from app.database.session import get_user_db
 from app.models.sqlmodels import Audit, BillItem, AuditFinding, Report, ExtractionMethod, AuditStatus
 from app.models.schemas import (
-    AuditOut, AuditDetailOut, BillItemExtract, BillExtraction,
+    AuditOut, AuditDetailOut, AppealQuestions, BillItemExtract, BillExtraction,
 )
 from app.services.gemini_service import GeminiService
 from app.services.ocr_service import OCRService
@@ -35,6 +35,46 @@ def _validate_file(file: UploadFile) -> None:
         raise HTTPException(status_code=400, detail=f"Unsupported file type: {ext}. Allowed: JPG, JPEG, PNG, PDF")
     if file.content_type and file.content_type not in ALLOWED_MIME and ext != ".pdf":
         raise HTTPException(status_code=400, detail="Unsupported MIME type")
+
+
+def _persist_extraction(
+    audit: Audit,
+    extraction: BillExtraction,
+    db: Session,
+    method: Optional[str] = None,
+) -> None:
+    audit.hospital_name = extraction.hospital_name
+    audit.bill_number = extraction.bill_number
+    audit.patient_name = extraction.patient_name
+    audit.bill_date = extraction.bill_date
+    audit.admission_date = extraction.admission_date
+    audit.discharge_date = extraction.discharge_date
+    audit.subtotal = extraction.subtotal
+    audit.discount = extraction.discount
+    audit.tax = extraction.tax
+    audit.grand_total = extraction.grand_total
+    audit.original_total = extraction.grand_total
+    audit.calculated_total = None
+    audit.uncertain_fields = extraction.uncertain_fields or []
+    audit.extraction_method = ExtractionMethod(method or extraction.extraction_method)
+    audit.extraction_confirmed = False
+    audit.benchmark_review = None
+    audit.status = AuditStatus.PENDING
+
+    db.query(BillItem).filter(BillItem.audit_id == audit.id).delete(synchronize_session=False)
+    db.query(AuditFinding).filter(AuditFinding.audit_id == audit.id).delete(synchronize_session=False)
+    for position, item in enumerate(extraction.items or []):
+        db.add(BillItem(
+            id=str(uuid.uuid4()),
+            audit_id=audit.id,
+            position=position,
+            description=item.item_name,
+            quantity=item.quantity,
+            unit_price=item.unit_price,
+            billed_total=item.total,
+            extraction_confidence=item.confidence,
+            category=item.category,
+        ))
 
 
 @router.post("/upload", status_code=202)
@@ -131,40 +171,38 @@ async def extract_bill(
         db.commit()
         raise HTTPException(status_code=500, detail="No extraction produced")
 
-    # Save extraction into audit fields
-    audit.hospital_name = extraction.hospital_name
-    audit.bill_number = extraction.bill_number
-    audit.patient_name = extraction.patient_name
-    audit.bill_date = extraction.bill_date
-    audit.admission_date = extraction.admission_date
-    audit.discharge_date = extraction.discharge_date
-    audit.grand_total = extraction.grand_total
-    audit.original_total = extraction.grand_total
-    audit.extraction_method = ExtractionMethod(method)
-    audit.status = AuditStatus.COMPLETED
-    db.commit()
-
-    # Replace items if extraction is retried after a network or client failure.
-    db.query(BillItem).filter(BillItem.audit_id == audit_id).delete(synchronize_session=False)
-    for item in (extraction.items or []):
-        db.add(BillItem(
-            id=str(uuid.uuid4()),
-            audit_id=audit_id,
-            description=item.item_name,
-            quantity=item.quantity,
-            unit_price=item.unit_price,
-            billed_total=item.total,
-            category=item.category,
-        ))
+    _persist_extraction(audit, extraction, db, method)
     db.commit()
 
     return {
         "audit_id": audit_id,
         "extraction_method": method,
         "extraction": extraction.model_dump(mode="json"),
-        "status": "COMPLETED",
-        "message": "Extraction complete.",
+        "status": "PENDING_CONFIRMATION",
+        "message": "Extraction is ready. Review and confirm the details before analysis.",
     }
+
+
+@router.put("/{audit_id}/confirm", response_model=dict)
+def confirm_extraction(
+    audit_id: str,
+    extraction: BillExtraction,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_user_db),
+):
+    """Persist the user's reviewed extraction before allowing analysis."""
+    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user.id).first()
+    if not audit:
+        raise HTTPException(status_code=404, detail="Audit not found")
+    if audit.extraction_method:
+        method = audit.extraction_method.value
+    else:
+        method = extraction.extraction_method
+
+    _persist_extraction(audit, extraction, db, method)
+    audit.extraction_confirmed = True
+    db.commit()
+    return {"audit_id": audit_id, "status": "CONFIRMED"}
 
 
 @router.post("/{audit_id}/analyze", response_model=dict)
@@ -177,17 +215,27 @@ async def analyze_audit(
     audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user.id).first()
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
+    if not audit.extraction_confirmed:
+        raise HTTPException(status_code=409, detail="Review and confirm extracted bill details before analysis.")
 
-    items = db.query(BillItem).filter(BillItem.audit_id == audit_id).all()
+    items = (
+        db.query(BillItem)
+        .filter(BillItem.audit_id == audit_id)
+        .order_by(BillItem.position, BillItem.id)
+        .all()
+    )
     extraction = BillExtraction(
         hospital_name=audit.hospital_name,
         bill_number=audit.bill_number,
         patient_name=audit.patient_name,
-        bill_date=str(audit.bill_date) if audit.bill_date else None,
-        admission_date=str(audit.admission_date) if audit.admission_date else None,
-        discharge_date=str(audit.discharge_date) if audit.discharge_date else None,
+        bill_date=audit.bill_date,
+        admission_date=audit.admission_date,
+        discharge_date=audit.discharge_date,
         grand_total=float(audit.original_total) if audit.original_total is not None else None,
-        subtotal=None,
+        subtotal=float(audit.subtotal) if audit.subtotal is not None else None,
+        discount=float(audit.discount) if audit.discount is not None else None,
+        tax=float(audit.tax) if audit.tax is not None else None,
+        uncertain_fields=audit.uncertain_fields or [],
         items=[
             BillItemExtract(
                 item_name=it.description,
@@ -195,6 +243,7 @@ async def analyze_audit(
                 unit_price=float(it.unit_price) if it.unit_price is not None else None,
                 total=float(it.billed_total) if it.billed_total is not None else None,
                 category=it.category,
+                confidence=float(it.extraction_confidence) if it.extraction_confidence is not None else None,
             )
             for it in items
         ],
@@ -223,10 +272,16 @@ async def analyze_audit(
     db.query(AuditFinding).filter(AuditFinding.audit_id == audit_id).delete()
 
     for f in result["findings"]:
+        item_index = f.get("bill_item_index")
+        bill_item_id = (
+            items[item_index].id
+            if isinstance(item_index, int) and 0 <= item_index < len(items)
+            else None
+        )
         db.add(AuditFinding(
             id=str(uuid.uuid4()),
             audit_id=audit_id,
-            bill_item_id=None,
+            bill_item_id=bill_item_id,
             finding_type=f["finding_type"],
             title=f["title"],
             description=f.get("description"),
@@ -236,11 +291,18 @@ async def analyze_audit(
             expected_value=f.get("expected_value"),
             actual_value=f.get("actual_value"),
             estimated_difference=f.get("estimated_difference"),
+            source_name=f.get("source_name"),
+            source_url=f.get("source_url"),
+            source_date=f.get("source_date"),
+            applicability_notes=f.get("applicability_notes"),
             status=f.get("status", "open"),
         ))
 
     calculated_total = result.get("calculated_total")
     audit.calculated_total = Decimal(str(calculated_total)) if calculated_total is not None else None
+    audit.benchmark_review = {
+        key: value for key, value in result["benchmark"].items() if key != "findings"
+    }
     audit.status = AuditStatus.COMPLETED
     db.commit()
 
@@ -290,7 +352,12 @@ def download_report(
     if not audit:
         raise HTTPException(status_code=404, detail="Audit not found")
 
-    items = db.query(BillItem).filter(BillItem.audit_id == audit_id).all()
+    items = (
+        db.query(BillItem)
+        .filter(BillItem.audit_id == audit_id)
+        .order_by(BillItem.position, BillItem.id)
+        .all()
+    )
     findings = db.query(AuditFinding).filter(AuditFinding.audit_id == audit_id).all()
 
     pdf = PDFService()
@@ -303,8 +370,12 @@ def download_report(
             "bill_date": str(audit.bill_date) if audit.bill_date else None,
             "admission_date": str(audit.admission_date) if audit.admission_date else None,
             "discharge_date": str(audit.discharge_date) if audit.discharge_date else None,
+            "subtotal": float(audit.subtotal) if audit.subtotal is not None else None,
+            "discount": float(audit.discount) if audit.discount is not None else None,
+            "tax": float(audit.tax) if audit.tax is not None else None,
             "original_total": float(audit.original_total) if audit.original_total is not None else None,
             "calculated_total": float(audit.calculated_total) if audit.calculated_total is not None else None,
+            "benchmark_review": audit.benchmark_review,
         },
         bill_items=[
             {
@@ -321,6 +392,10 @@ def download_report(
                 "title": f.title,
                 "description": f.description,
                 "estimated_difference": float(f.estimated_difference) if f.estimated_difference is not None else None,
+                "source_name": f.source_name,
+                "source_url": f.source_url,
+                "source_date": str(f.source_date) if f.source_date else None,
+                "applicability_notes": f.applicability_notes,
             }
             for f in findings
         ],
@@ -334,18 +409,13 @@ def download_report(
     return FileResponse(path, media_type="application/pdf", filename=f"hisaab_audit_{audit_id}.pdf")
 
 
-@router.get("/{audit_id}/appeal")
-def generate_appeal(
+def _generate_appeal_response(
     audit_id: str,
-    user: AuthenticatedUser = Depends(get_current_user),
-    db: Session = Depends(get_user_db),
+    audit: Audit,
+    findings: List[AuditFinding],
+    db: Session,
+    questions: Optional[List[str]] = None,
 ):
-    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user.id).first()
-    if not audit:
-        raise HTTPException(status_code=404, detail="Audit not found")
-
-    findings = db.query(AuditFinding).filter(AuditFinding.audit_id == audit_id).all()
-
     pdf = PDFService()
     path = pdf.generate_appeal_letter(
         audit_id=audit_id,
@@ -358,12 +428,44 @@ def generate_appeal(
         hospital_name=audit.hospital_name or "Hospital",
         bill_number=audit.bill_number or "—",
         bill_date=str(audit.bill_date) if audit.bill_date else "—",
+        questions=(
+            [question.strip() for question in questions if question.strip()]
+            if questions is not None
+            else None
+        ),
     )
 
     db.add(Report(id=str(uuid.uuid4()), audit_id=audit_id, report_type="appeal_letter", storage_path=path))
     db.commit()
 
     return FileResponse(path, media_type="application/pdf", filename=f"hisaab_appeal_{audit_id}.pdf")
+
+
+@router.get("/{audit_id}/appeal")
+def generate_appeal(
+    audit_id: str,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_user_db),
+):
+    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user.id).first()
+    if not audit:
+        raise HTTPException(status_code=404, detail="Audit not found")
+    findings = db.query(AuditFinding).filter(AuditFinding.audit_id == audit_id).all()
+    return _generate_appeal_response(audit_id, audit, findings, db)
+
+
+@router.post("/{audit_id}/appeal")
+def generate_custom_appeal(
+    audit_id: str,
+    data: AppealQuestions,
+    user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_user_db),
+):
+    audit = db.query(Audit).filter(Audit.id == audit_id, Audit.user_id == user.id).first()
+    if not audit:
+        raise HTTPException(status_code=404, detail="Audit not found")
+    findings = db.query(AuditFinding).filter(AuditFinding.audit_id == audit_id).all()
+    return _generate_appeal_response(audit_id, audit, findings, db, data.questions)
 
 
 def _remove_audit_file(path: str, allowed_directory: str) -> None:

@@ -20,7 +20,7 @@ import type { BillExtraction } from "../types";
 
 const MAX_SIZE_MB = 10;
 
-type Step = "idle" | "uploading" | "extracting" | "analyzing" | "done" | "error";
+type Step = "idle" | "uploading" | "extracting" | "review" | "analyzing" | "done" | "error";
 
 export default function Upload() {
   const navigate = useNavigate();
@@ -210,10 +210,14 @@ export default function Upload() {
         const result = await auditApi.extract(activeAuditId);
         activeExtraction = result.extraction;
         setExtraction(activeExtraction);
+        setStep("review");
+        setProgress(100);
+        return;
       }
 
       setStep("analyzing");
       setProgress(70);
+      await auditApi.confirm(activeAuditId, activeExtraction);
       await auditApi.analyze(activeAuditId);
       setProgress(100);
       setStep("done");
@@ -249,7 +253,7 @@ export default function Upload() {
           </div>
           <div className="flex shrink-0 items-center gap-2 self-start rounded-2xl border border-white/15 bg-white/10 px-3.5 py-3 text-xs text-white/80 sm:self-auto">
             <FileCheck2 size={17} className="text-[#d9efe3]" />
-            <span><strong className="text-white">Step 1</strong> of 3 · Add your bill</span>
+            <span><strong className="text-white">Step {extraction ? 2 : 1}</strong> of 3 · {extraction ? "Confirm details" : "Add your bill"}</span>
           </div>
         </div>
       </header>
@@ -368,7 +372,7 @@ export default function Upload() {
                   />
                 )}
 
-                <div className="rounded-xl bg-[#f1f6f1] px-3.5 py-3 text-left">
+                {!extraction && <div className="rounded-xl bg-[#f1f6f1] px-3.5 py-3 text-left">
                   <p className="flex items-center gap-2 text-xs font-semibold text-dark-teal">
                     <CheckCircle2 size={15} className="shrink-0 text-deep-sage" />
                     File selected—processing has not started yet.
@@ -376,7 +380,148 @@ export default function Upload() {
                   <p className="mt-1 pl-[23px] text-[11px] leading-5 text-slate-600">
                     Starting the review sends the file to the configured backend for extraction and analysis.
                   </p>
-                </div>
+                </div>}
+
+                {extraction && (
+                  <section className="space-y-4 rounded-2xl border border-[#dfe8df] bg-[#fbfcfa] p-4 text-left sm:p-5" aria-labelledby="confirm-extraction-title">
+                    <div>
+                      <h3 id="confirm-extraction-title" className="font-serif text-lg font-bold text-dark-teal">
+                        Confirm the extracted bill details
+                      </h3>
+                      <p className="mt-1 text-xs leading-5 text-slate-600">
+                        Check these values against the original. The review will not run until you confirm them.
+                      </p>
+                    </div>
+
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {([
+                        ["subtotal", "Billed subtotal"],
+                        ["discount", "Discount"],
+                        ["tax", "Tax"],
+                        ["grand_total", "Billed final total"],
+                      ] as const).map(([field, label]) => (
+                        <label key={field} className="text-xs font-semibold text-slate-700">
+                          {label}
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={extraction[field] ?? ""}
+                            onChange={(event) => {
+                              const value = event.currentTarget.value;
+                              setExtraction((current) => current
+                                ? { ...current, [field]: value === "" ? null : Number(value) }
+                                : current);
+                            }}
+                            className="mt-1.5 min-h-10 w-full rounded-lg border border-[#dfe8df] bg-white px-3 text-sm font-normal text-slate-800 outline-none focus:border-deep-sage focus:ring-2 focus:ring-deep-sage/20"
+                          />
+                        </label>
+                      ))}
+                    </div>
+
+                    <div className="overflow-x-auto rounded-xl border border-[#e5ece5] bg-white">
+                      <table className="w-full min-w-[690px] text-left text-xs">
+                        <thead className="bg-[#f4f8f3] text-[10px] uppercase tracking-wide text-slate-500">
+                          <tr>
+                            <th className="px-3 py-2.5">Item</th>
+                            <th className="px-3 py-2.5">Qty</th>
+                            <th className="px-3 py-2.5">Unit price</th>
+                            <th className="px-3 py-2.5">Billed total</th>
+                            <th className="px-3 py-2.5"><span className="sr-only">Remove</span></th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {extraction.items.map((item, index) => (
+                            <tr key={`${index}-${item.item_name || "item"}`} className="border-t border-[#edf1ed]">
+                              <td className="px-2 py-2">
+                                <input
+                                  aria-label={`Item ${index + 1} description`}
+                                  value={item.item_name ?? ""}
+                                  onChange={(event) => {
+                                    const value = event.currentTarget.value;
+                                    setExtraction((current) => current ? {
+                                      ...current,
+                                      items: current.items.map((row, rowIndex) =>
+                                        rowIndex === index ? { ...row, item_name: value } : row),
+                                    } : current);
+                                  }}
+                                  className="min-h-9 w-full rounded-lg border border-[#e1e9e1] px-2.5 text-xs outline-none focus:border-deep-sage"
+                                />
+                              </td>
+                              {(["quantity", "unit_price", "total"] as const).map((field) => (
+                                <td key={field} className="px-2 py-2">
+                                  <input
+                                    aria-label={`Item ${index + 1} ${field.replace("_", " ")}`}
+                                    type="number"
+                                    step="0.01"
+                                    value={item[field] ?? ""}
+                                    onChange={(event) => {
+                                      const value = event.currentTarget.value;
+                                      setExtraction((current) => current ? {
+                                        ...current,
+                                        items: current.items.map((row, rowIndex) =>
+                                          rowIndex === index
+                                            ? { ...row, [field]: value === "" ? null : Number(value) }
+                                            : row),
+                                      } : current);
+                                    }}
+                                    className="min-h-9 w-24 rounded-lg border border-[#e1e9e1] px-2 text-right text-xs outline-none focus:border-deep-sage"
+                                  />
+                                </td>
+                              ))}
+                              <td className="px-2 py-2 text-right">
+                                <button
+                                  type="button"
+                                  aria-label={`Remove item ${index + 1}`}
+                                  onClick={() => setExtraction((current) => current
+                                    ? { ...current, items: current.items.filter((_, rowIndex) => rowIndex !== index) }
+                                    : current)}
+                                  className="rounded-lg p-2 text-slate-500 hover:bg-rose-50 hover:text-rose-700"
+                                >
+                                  <Trash2 size={14} />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                          {extraction.items.length === 0 && (
+                            <tr><td colSpan={5} className="px-3 py-5 text-center text-slate-500">No extracted items. Add one if the bill has itemized charges.</td></tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => setExtraction((current) => current
+                        ? { ...current, items: [...current.items, { item_name: "", quantity: null, unit_price: null, total: null }] }
+                        : current)}
+                      className="text-xs font-semibold text-deep-sage hover:text-dark-teal"
+                    >
+                      + Add missing bill item
+                    </button>
+
+                    {extraction.uncertain_fields.length > 0 && (
+                      <fieldset className="rounded-xl border border-amber-200 bg-amber-50/70 p-3">
+                        <legend className="px-1 text-xs font-semibold text-amber-900">Confirm unclear extracted fields</legend>
+                        <p className="mb-2 text-[11px] leading-5 text-amber-900/80">Unconfirmed fields will be included as review prompts.</p>
+                        <div className="flex flex-wrap gap-2">
+                          {extraction.uncertain_fields.map((field) => (
+                            <label key={field} className="inline-flex items-center gap-1.5 rounded-lg bg-white px-2.5 py-1.5 text-[11px] text-slate-700">
+                              <input
+                                type="checkbox"
+                                checked={false}
+                                onChange={() => setExtraction((current) => current
+                                  ? { ...current, uncertain_fields: current.uncertain_fields.filter((value) => value !== field) }
+                                  : current)}
+                                className="accent-[#477c69]"
+                              />
+                              I verified {field.replaceAll("_", " ")}
+                            </label>
+                          ))}
+                        </div>
+                      </fieldset>
+                    )}
+                  </section>
+                )}
 
                 {!isProcessing && (
                   <div className="flex flex-wrap items-center justify-center gap-2">
@@ -415,7 +560,7 @@ export default function Upload() {
                       <div className="h-full rounded-full bg-deep-sage transition-[width] duration-300" style={{ width: `${progress}%` }} />
                     </div>
                     <p role="status" className="mt-2 text-xs text-slate-500">
-                      {step === "uploading" ? "Uploading file…" : step === "extracting" ? "Extracting bill details…" : "Checking the extracted details…"}
+                      {step === "uploading" ? "Uploading file…" : step === "extracting" ? "Extracting bill details…" : "Checking the confirmed details…"}
                     </p>
                   </div>
                 )}
@@ -431,10 +576,10 @@ export default function Upload() {
                       <Loader2 className="h-5 w-5 animate-spin" />
                       {step === "uploading" ? "Uploading…" : step === "extracting" ? "Extracting…" : "Checking…"}
                     </>
-                  ) : step === "error" ? (
-                    "Resume bill check"
+                  ) : extraction ? (
+                    "Confirm details and run checks"
                   ) : (
-                    "Start bill check"
+                    step === "error" ? "Resume extraction" : "Upload and extract details"
                   )}
                 </button>
               </div>

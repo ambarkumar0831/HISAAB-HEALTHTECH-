@@ -2,6 +2,7 @@ import logging
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import date
+from urllib.parse import urlparse
 
 from app.models.schemas import BillExtraction, BillItemExtract
 
@@ -36,7 +37,7 @@ class AuditEngine:
         arithmetic = self._check_arithmetic(items, extraction)
         duplicates = self._detect_duplicates(items)
         date_checks = self._check_dates(extraction)
-        unclear = self._detect_unclear_charges(items)
+        unclear = self._detect_unclear_charges(items, extraction.uncertain_fields or [])
         benchmark = self._check_benchmarks(items, extraction)
 
         findings = []
@@ -94,33 +95,48 @@ class AuditEngine:
         findings = []
         item_level_diffs = []
         calculated_subtotal = Decimal("0")
+        subtotal_complete = bool(items)
 
         for idx, item in enumerate(items):
             qty = _to_decimal(item.quantity)
             price = _to_decimal(item.unit_price)
             billed_total = _to_decimal(item.total)
+            missing_fields = []
+            if qty is None:
+                missing_fields.append("quantity")
+            if price is None:
+                missing_fields.append("unit price")
+            if billed_total is None:
+                missing_fields.append("billed total")
 
-            if qty is None or price is None or billed_total is None:
-                # Cannot verify without all three values
-                continue
+            expected = _money(qty * price) if qty is not None and price is not None else None
+            if expected is None:
+                subtotal_complete = False
+            else:
+                calculated_subtotal += expected
 
-            expected = _money(qty * price)
-            difference = _money(billed_total - expected)
+            difference = _money(billed_total - expected) if billed_total is not None and expected is not None else None
+            status = (
+                "NOT_CHECKED"
+                if missing_fields
+                else "MISMATCH"
+                if difference != 0
+                else "OK"
+            )
 
             item_level_diffs.append({
                 "item_index": idx,
                 "item_name": item.item_name or f"Item {idx + 1}",
-                "quantity": float(qty),
-                "unit_price": float(price),
-                "billed_total": float(billed_total),
-                "expected_total": float(expected),
-                "difference": float(difference),
-                "status": "MISMATCH" if difference != 0 else "OK",
+                "quantity": float(qty) if qty is not None else None,
+                "unit_price": float(price) if price is not None else None,
+                "billed_total": float(billed_total) if billed_total is not None else None,
+                "expected_total": float(expected) if expected is not None else None,
+                "difference": float(difference) if difference is not None else None,
+                "missing_fields": missing_fields,
+                "status": status,
             })
 
-            calculated_subtotal += expected
-
-            if difference != 0:
+            if status == "MISMATCH":
                 findings.append({
                     "finding_type": "ARITHMETIC",
                     "title": f"Arithmetic mismatch: {item.item_name or 'item'}",
@@ -128,7 +144,7 @@ class AuditEngine:
                         f"Quantity {qty} × Unit price ₹{price} = ₹{expected}, "
                         f"but billed total is ₹{billed_total}."
                     ),
-                    "bill_item_id": None,
+                    "bill_item_index": idx,
                     "reason_code": "ITEM_TOTAL_MISMATCH",
                     "severity": "HIGH" if abs(difference) > Decimal("100") else "MEDIUM",
                     "confidence": 0.95,
@@ -141,7 +157,7 @@ class AuditEngine:
         # Subtotal check
         extracted_subtotal = _to_decimal(extraction.subtotal)
         subtotal_diff = None
-        if extracted_subtotal is not None:
+        if extracted_subtotal is not None and subtotal_complete:
             subtotal_diff = _money(extracted_subtotal - calculated_subtotal)
             if subtotal_diff != 0:
                 findings.append({
@@ -160,13 +176,17 @@ class AuditEngine:
                 })
 
         # Grand total check: subtotal - discount + tax
-        discount = _to_decimal(extraction.discount) or Decimal("0")
-        tax = _to_decimal(extraction.tax) or Decimal("0")
+        discount = _to_decimal(extraction.discount)
+        tax = _to_decimal(extraction.tax)
         grand_total = _to_decimal(extraction.grand_total)
 
-        expected_grand = _money(calculated_subtotal - discount + tax)
+        expected_grand = (
+            _money(calculated_subtotal - discount + tax)
+            if subtotal_complete and discount is not None and tax is not None
+            else None
+        )
         grand_diff = None
-        if grand_total is not None:
+        if grand_total is not None and expected_grand is not None:
             grand_diff = _money(grand_total - expected_grand)
             if grand_diff != 0:
                 findings.append({
@@ -186,11 +206,20 @@ class AuditEngine:
                 })
 
         return {
-            "calculated_total": expected_grand,
             "calculated_subtotal": float(calculated_subtotal),
+            "subtotal_complete": subtotal_complete,
+            "discount": float(discount) if discount is not None else None,
+            "tax": float(tax) if tax is not None else None,
+            "total_components_complete": discount is not None and tax is not None,
             "item_checks": item_level_diffs,
             "subtotal_difference": float(subtotal_diff) if subtotal_diff is not None else None,
             "grand_total_difference": float(grand_diff) if grand_diff is not None else None,
+            "calculated_total": float(expected_grand) if expected_grand is not None else None,
+            "total_status": (
+                "CHECKED"
+                if expected_grand is not None and grand_total is not None
+                else "NOT_CHECKED"
+            ),
             "findings": findings,
         }
 
@@ -219,10 +248,11 @@ class AuditEngine:
                         "finding_type": "DUPLICATE",
                         "title": f"Possible duplicate charge: {item.item_name or 'item'}",
                         "description": (
-                            f"'{item.item_name}' appears more than once with the same billed amount "
-                            f"₹{total}. Verify whether the service was performed multiple times."
+                            f"Rows {prev['index'] + 1} and {idx + 1} have similar descriptions "
+                            f"('{prev['display_name']}' and '{item.item_name}') and the same billed amount "
+                            f"₹{total}. Confirm whether these were separate services."
                         ),
-                        "bill_item_id": None,
+                        "bill_item_index": idx,
                         "reason_code": "POSSIBLE_DUPLICATE",
                         "severity": "MEDIUM",
                         "confidence": 0.7,
@@ -235,6 +265,7 @@ class AuditEngine:
 
             seen.append({
                 "name": name,
+                "display_name": item.item_name or f"Item {idx + 1}",
                 "quantity": qty,
                 "total": total,
                 "service_date": getattr(item, "service_date", None),
@@ -326,9 +357,11 @@ class AuditEngine:
 
     # ---------------- Unclear charges ----------------
 
-    def _detect_unclear_charges(self, items: List[BillItemExtract]) -> Dict[str, Any]:
+    def _detect_unclear_charges(
+        self, items: List[BillItemExtract], uncertain_fields: List[str]
+    ) -> Dict[str, Any]:
         findings = []
-        for item in items:
+        for idx, item in enumerate(items):
             name = (item.item_name or "").strip()
             qty = _to_decimal(item.quantity)
             price = _to_decimal(item.unit_price)
@@ -343,6 +376,10 @@ class AuditEngine:
                 reasons.append("missing quantity")
             if qty is not None and qty > 10:
                 reasons.append(f"unusually high quantity ({qty})")
+            if total is None:
+                reasons.append("missing billed total")
+            if item.confidence is not None and item.confidence < 0.75:
+                reasons.append(f"low extraction confidence ({item.confidence:.0%})")
 
             if reasons:
                 findings.append({
@@ -350,13 +387,31 @@ class AuditEngine:
                     "title": f"Unclear charge: {name or 'unidentified item'}",
                     "description": "Possible issues: " + "; ".join(reasons) + ". Please verify with the hospital.",
                     "reason_code": "UNCLEAR_CHARGE",
+                    "bill_item_index": idx,
                     "severity": "LOW",
                     "confidence": 0.5,
                     "expected_value": None,
-                    "actual_value": float(total) if total else None,
-                    "estimated_difference": float(total) if total else None,
+                    "actual_value": float(total) if total is not None else None,
+                    "estimated_difference": float(total) if total is not None else None,
                     "status": "open",
                 })
+
+        for field in dict.fromkeys(uncertain_fields or []):
+            findings.append({
+                "finding_type": "UNCLEAR_CHARGE",
+                "title": f"Confirm extracted {field.replace('_', ' ')}",
+                "description": (
+                    f"The extraction marked {field.replace('_', ' ')} as uncertain. "
+                    "Compare it with the original bill before relying on calculations."
+                ),
+                "reason_code": "EXTRACTION_UNCERTAINTY",
+                "severity": "LOW",
+                "confidence": None,
+                "expected_value": None,
+                "actual_value": None,
+                "estimated_difference": None,
+                "status": "open",
+            })
 
         return {
             "unclear_count": len(findings),
@@ -370,43 +425,142 @@ class AuditEngine:
     ) -> Dict[str, Any]:
         findings = []
         if not self.benchmark_service:
-            return {"benchmarks_checked": 0, "findings": findings}
+            return {
+                "benchmarks_checked": 0,
+                "not_checked_reason": "No benchmark source is configured.",
+                "comparisons": [],
+                "findings": findings,
+            }
 
         benchmarks = self.benchmark_service.list_benchmarks() or []
-
-        for item in items:
-            name = (item.item_name or "").strip()
-            total = _to_decimal(item.total)
-            if not name or total is None:
+        bill_date = extraction.bill_date
+        eligible_by_source = {}
+        for benchmark in benchmarks:
+            source_name = (benchmark.get("source_name") or "").strip()
+            source_url = (benchmark.get("source_url") or "").strip()
+            try:
+                parsed_url = urlparse(source_url)
+                valid_source_url = (
+                    parsed_url.scheme == "https"
+                    and bool(parsed_url.netloc)
+                    and bool(parsed_url.hostname)
+                    and parsed_url.username is None
+                    and parsed_url.password is None
+                )
+            except ValueError:
+                valid_source_url = False
+            effective_from = self._as_date(benchmark.get("effective_from"))
+            effective_until = self._as_date(benchmark.get("effective_until"))
+            if (
+                not source_name
+                or not valid_source_url
+                or not effective_from
+                or not bill_date
+                or bill_date < effective_from
+                or (effective_until and bill_date > effective_until)
+            ):
                 continue
+            eligible_by_source.setdefault((source_name, source_url), []).append(benchmark)
 
-            match = self.benchmark_service.find_matching_benchmark(name, benchmarks)
-            if not match:
-                continue
+        source_matches = []
+        for source_key in sorted(eligible_by_source):
+            matches = []
+            source_rates = sorted(
+                eligible_by_source[source_key],
+                key=lambda benchmark: (
+                    self._as_date(benchmark.get("effective_from")) or date.min,
+                    str(benchmark.get("id") or ""),
+                ),
+                reverse=True,
+            )
+            for idx, item in enumerate(items):
+                name = (item.item_name or "").strip()
+                unit_price = _to_decimal(item.unit_price)
+                if not name or unit_price is None:
+                    continue
+                match = self.benchmark_service.find_matching_benchmark(name, source_rates)
+                if match and _to_decimal(match.get("rate")) is not None:
+                    matches.append((idx, item, match, unit_price))
+            if matches:
+                source_matches.append((source_key, matches))
 
-            bench_rate = _to_decimal(match.get("rate"))
-            if bench_rate is None:
-                continue
-
-            diff = _money(total - bench_rate)
-            if diff != 0:
-                findings.append({
-                    "finding_type": "BENCHMARK",
-                    "title": f"Potential benchmark difference: {name}",
-                    "description": (
-                        f"Hospital charged ₹{total}; applicable benchmark rate is ₹{bench_rate} "
-                        f"({match.get('source_name')}). This may or may not apply to your case."
-                    ),
-                    "reason_code": "BENCHMARK_DIFFERENCE",
-                    "severity": "MEDIUM",
-                    "confidence": 0.6,
-                    "expected_value": float(bench_rate),
-                    "actual_value": float(total),
-                    "estimated_difference": float(abs(diff)),
-                    "status": "open",
+        selected_source = None
+        checked = 0
+        comparisons = []
+        if source_matches:
+            selected_source, matches = min(
+                source_matches,
+                key=lambda entry: (-len(entry[1]), entry[0]),
+            )
+            for idx, item, match, unit_price in matches[:5]:
+                bench_rate = _to_decimal(match.get("rate"))
+                if bench_rate is None:
+                    continue
+                diff = _money(unit_price - bench_rate)
+                checked += 1
+                effective_from = self._as_date(match.get("effective_from"))
+                effective_until = self._as_date(match.get("effective_until"))
+                applicability_notes = (
+                    match.get("applicability_notes")
+                    or "Applicability to the patient and provider has not been verified."
+                )
+                comparisons.append({
+                    "bill_item_index": idx,
+                    "item_name": item.item_name,
+                    "unit_price": float(unit_price),
+                    "reference_rate": float(bench_rate),
+                    "effective_from": str(effective_from) if effective_from else None,
+                    "effective_until": str(effective_until) if effective_until else None,
+                    "applicability_notes": applicability_notes,
                 })
+                if diff != 0:
+                    period = str(effective_from)
+                    if effective_until:
+                        period += f" through {effective_until}"
+                    findings.append({
+                        "finding_type": "BENCHMARK",
+                        "title": f"Reference rate differs: {item.item_name}",
+                        "description": (
+                            f"Unit price on bill: ₹{unit_price}; published reference: ₹{bench_rate}. "
+                            f"Applicability to this hospital, location, plan, and service is not verified."
+                        ),
+                        "reason_code": "BENCHMARK_DIFFERENCE",
+                        "bill_item_index": idx,
+                        "severity": "MEDIUM",
+                        "confidence": 0.6,
+                        "expected_value": float(bench_rate),
+                        "actual_value": float(unit_price),
+                        "estimated_difference": float(abs(diff)),
+                        "source_name": selected_source[0],
+                        "source_url": selected_source[1],
+                        "source_date": effective_from,
+                        "applicability_notes": (
+                            f"Effective {period}. "
+                            f"{applicability_notes}"
+                        ),
+                        "status": "open",
+                    })
 
         return {
-            "benchmarks_checked": len(benchmarks),
+            "benchmarks_checked": checked,
+            "source_name": selected_source[0] if selected_source else None,
+            "source_url": selected_source[1] if selected_source else None,
+            "comparisons": comparisons,
+            "not_checked_reason": (
+                None
+                if selected_source
+                else "No source-backed rate with a valid effective date could be matched to this bill."
+            ),
             "findings": findings,
         }
+
+    @staticmethod
+    def _as_date(value) -> Optional[date]:
+        if isinstance(value, date):
+            return value
+        if not value:
+            return None
+        try:
+            return date.fromisoformat(str(value)[:10])
+        except ValueError:
+            return None

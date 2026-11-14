@@ -3,6 +3,7 @@ import os
 import uuid
 from datetime import datetime
 from decimal import Decimal
+from xml.sax.saxutils import escape, quoteattr
 
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import mm
@@ -79,9 +80,18 @@ class PDFService:
         # Totals
         orig = audit.get("original_total")
         calc = audit.get("calculated_total")
+        calculated_subtotal = (
+            sum((it["expected_total"] for it in bill_items), 0)
+            if bill_items and all(it.get("expected_total") is not None for it in bill_items)
+            else None
+        )
         totals = [
-            ["Total Billed Amount", f"₹{orig}" if orig is not None else "—"],
-            ["Independently Calculated Amount", f"₹{calc}" if calc is not None else "—"],
+            ["Line subtotal (quantity × unit price)", f"₹{calculated_subtotal}" if calculated_subtotal is not None else "Not checked"],
+            ["Subtotal printed on bill", f"₹{audit['subtotal']}" if audit.get("subtotal") is not None else "Not extracted"],
+            ["Discount", f"− ₹{audit['discount']}" if audit.get("discount") is not None else "Not extracted"],
+            ["Tax", f"+ ₹{audit['tax']}" if audit.get("tax") is not None else "Not extracted"],
+            ["Calculated final total", f"₹{calc}" if calc is not None else "Not checked"],
+            ["Total shown on bill", f"₹{orig}" if orig is not None else "Not extracted"],
         ]
         t2 = Table(totals, colWidths=[80*mm, 80*mm])
         t2.setStyle(TableStyle([
@@ -110,7 +120,7 @@ class PDFService:
             )
             item_data.append([
                 it.get("description") or "—",
-                str(it.get("quantity") or "—"),
+                str(it.get("quantity")) if it.get("quantity") is not None else "—",
                 f"₹{it.get('unit_price')}" if it.get("unit_price") is not None else "—",
                 f"₹{it.get('billed_total')}" if it.get("billed_total") is not None else "—",
                 f"₹{it.get('expected_total')}" if it.get("expected_total") is not None else "—",
@@ -130,16 +140,58 @@ class PDFService:
         story.append(itbl)
         story.append(Spacer(1, 10))
 
+        benchmark_review = audit.get("benchmark_review") or {}
+        story.append(Paragraph("Published Rate Reference", styles["SectionHead"]))
+        if benchmark_review.get("source_url"):
+            source_name = escape(str(benchmark_review.get("source_name") or "Published source"))
+            story.append(Paragraph(
+                f"Source: {source_name} · "
+                f"<link href={quoteattr(str(benchmark_review['source_url']))} color='#477C69'>View source</link>",
+                styles["Body"],
+            ))
+            for comparison in benchmark_review.get("comparisons", []):
+                effective_from = comparison.get("effective_from")
+                effective_until = comparison.get("effective_until")
+                period = (
+                    f" · effective {escape(str(effective_from))}"
+                    f"{' through ' + escape(str(effective_until)) if effective_until else ''}"
+                    if effective_from
+                    else ""
+                )
+                story.append(Paragraph(
+                    f"{escape(str(comparison.get('item_name') or 'Bill item'))}: "
+                    f"unit price ₹{comparison.get('unit_price')} vs reference ₹{comparison.get('reference_rate')}{period}. "
+                    f"{escape(str(comparison.get('applicability_notes') or 'Applicability is not verified.'))}",
+                    styles["Small"],
+                ))
+        else:
+            story.append(Paragraph(
+                escape(str(benchmark_review.get("not_checked_reason") or "No source-backed rate comparison was made.")),
+                styles["Body"],
+            ))
+
         # Findings
         story.append(Paragraph("Audit Findings", styles["SectionHead"]))
         if not findings:
-            story.append(Paragraph("No significant findings. The bill appears arithmetically consistent.", styles["Body"]))
+            story.append(Paragraph(
+                "No review prompts were generated. This does not confirm every bill entry is correct.",
+                styles["Body"],
+            ))
         else:
             for f in findings:
-                story.append(Paragraph(f"<b>{f.get('title')}</b>", styles["Body"]))
-                story.append(Paragraph(f"{f.get('description') or ''}", styles["Body"]))
+                story.append(Paragraph(f"<b>{escape(str(f.get('title') or 'Review prompt'))}</b>", styles["Body"]))
+                story.append(Paragraph(escape(str(f.get("description") or "")), styles["Body"]))
                 if f.get("estimated_difference") is not None:
                     story.append(Paragraph(f"Estimated difference: ₹{f['estimated_difference']}", styles["Small"]))
+                if f.get("source_url"):
+                    story.append(Paragraph(
+                        f"Source: {escape(str(f.get('source_name') or 'Published source'))}"
+                        f"{' · effective ' + escape(str(f['source_date'])) if f.get('source_date') else ''}"
+                        f" · <link href={quoteattr(str(f['source_url']))} color='#477C69'>View source</link>",
+                        styles["Small"],
+                    ))
+                    if f.get("applicability_notes"):
+                        story.append(Paragraph(escape(str(f["applicability_notes"])), styles["Small"]))
                 story.append(Spacer(1, 4))
 
         story.append(Spacer(1, 14))
@@ -164,6 +216,7 @@ class PDFService:
         hospital_name: str,
         bill_number: str,
         bill_date: str,
+        questions: list | None = None,
     ) -> str:
         filename = f"appeal_letter_{audit_id}.pdf"
         path = os.path.join(self.report_dir, filename)
@@ -172,7 +225,7 @@ class PDFService:
         story = []
 
         story.append(Paragraph("HISAAB", styles["HisaabTitle"]))
-        story.append(Paragraph("Grievance / Appeal Letter — Draft", styles["HisaabSubtitle"]))
+        story.append(Paragraph("Hospital Bill Questions — Draft", styles["HisaabSubtitle"]))
         story.append(HRFlowable(width="100%", thickness=1, color=colors.HexColor("#477C69"), spaceAfter=10))
 
         story.append(Paragraph(f"Date: {datetime.utcnow().strftime('%d %B %Y')}", styles["Body"]))
@@ -187,15 +240,14 @@ class PDFService:
 
         story.append(Paragraph(
             f"Dear Sir / Madam,<br/><br/>"
-            f"I am writing with respect to hospital bill number <b>{bill_number}</b> dated {bill_date or '—'} "
-            f"issued by {hospital_name or 'the hospital'} for patient {patient_name or 'the patient'}.",
+            f"I am writing with respect to hospital bill number <b>{escape(str(bill_number))}</b> dated {escape(str(bill_date or '—'))} "
+            f"issued by {escape(str(hospital_name or 'the hospital'))} for patient {escape(str(patient_name or 'the patient'))}.",
             styles["Body"],
         ))
         story.append(Spacer(1, 6))
 
         story.append(Paragraph(
-            "After reviewing the bill using an independent audit tool, I have identified the following entries "
-            "that require clarification or correction:",
+            "An automated review raised the following entries for clarification. These prompts are not confirmed errors:",
             styles["Body"],
         ))
         story.append(Spacer(1, 6))
@@ -203,23 +255,34 @@ class PDFService:
         if findings:
             for idx, f in enumerate(findings, 1):
                 story.append(Paragraph(
-                    f"{idx}. <b>{f.get('title')}</b><br/>{f.get('description') or ''}", styles["Body"]
+                    f"{idx}. <b>{escape(str(f.get('title') or 'Review prompt'))}</b><br/>{escape(str(f.get('description') or ''))}", styles["Body"]
                 ))
                 if f.get("estimated_difference") is not None:
                     story.append(Paragraph(f"Estimated amount in question: ₹{f['estimated_difference']}", styles["Small"]))
                 story.append(Spacer(1, 4))
         else:
-            story.append(Paragraph("No discrepancies were identified in this audit.", styles["Body"]))
+            story.append(Paragraph(
+                "No review prompts were generated. Please still compare the extracted details with the original bill.",
+                styles["Body"],
+            ))
             story.append(Spacer(1, 4))
 
-        story.append(Paragraph(
-            "I request the hospital to:<br/>"
-            "&nbsp;&nbsp;1. Provide an itemized breakdown of the charges listed above.<br/>"
-            "&nbsp;&nbsp;2. Clarify the basis for each charge and share supporting documentation.<br/>"
-            "&nbsp;&nbsp;3. Correct any errors and issue a revised bill if applicable.<br/>"
-            "&nbsp;&nbsp;4. Provide a written response to this query.<br/><br/>",
-            styles["Body"],
-        ))
+        if questions is not None:
+            if questions:
+                story.append(Paragraph("Questions for the hospital:", styles["Body"]))
+                for idx, question in enumerate(questions, 1):
+                    story.append(Paragraph(f"{idx}. {escape(question.strip())}", styles["Body"]))
+            else:
+                story.append(Paragraph("No custom questions were added.", styles["Body"]))
+        else:
+            story.append(Paragraph(
+                "I request the hospital to:<br/>"
+                "&nbsp;&nbsp;1. Provide an itemized breakdown of the charges listed above.<br/>"
+                "&nbsp;&nbsp;2. Clarify the basis for each charge and share supporting documentation.<br/>"
+                "&nbsp;&nbsp;3. Correct any errors and issue a revised bill if applicable.<br/>"
+                "&nbsp;&nbsp;4. Provide a written response to this query.<br/><br/>",
+                styles["Body"],
+            ))
 
         story.append(Paragraph(
             "This letter is a request for clarification and does not constitute a legal accusation. "
@@ -231,9 +294,9 @@ class PDFService:
         story.append(Paragraph("Yours sincerely,", styles["Body"]))
         story.append(Spacer(1, 20))
         story.append(Paragraph("_________________________", styles["Body"]))
-        story.append(Paragraph(patient_name or "Patient / Representative", styles["Body"]))
+        story.append(Paragraph(escape(str(patient_name or "Patient / Representative")), styles["Body"]))
         story.append(Spacer(1, 10))
-        story.append(Paragraph(f"Bill Reference: {bill_number}", styles["Small"]))
+        story.append(Paragraph(f"Bill Reference: {escape(str(bill_number))}", styles["Small"]))
 
         doc.build(story)
         logger.info(f"Generated appeal letter: {path}")

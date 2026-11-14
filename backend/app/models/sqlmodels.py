@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Date, Numeric, Text, DateTime, Integer, ForeignKey, Enum
+from sqlalchemy import Boolean, Column, String, Date, Numeric, Text, DateTime, Integer, ForeignKey, Enum, JSON, text
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 
@@ -45,14 +45,25 @@ class Audit(Base):
     patient_name = Column(String, nullable=True)
     admission_date = Column(Date, nullable=True)
     discharge_date = Column(Date, nullable=True)
+    subtotal = Column(Numeric(12, 2), nullable=True)
+    discount = Column(Numeric(12, 2), nullable=True)
+    tax = Column(Numeric(12, 2), nullable=True)
     original_total = Column(Numeric(12, 2), nullable=True)
     calculated_total = Column(Numeric(12, 2), nullable=True)
+    uncertain_fields = Column(JSON, nullable=False, default=list, server_default=text("'[]'"))
+    benchmark_review = Column(JSON, nullable=True)
+    extraction_confirmed = Column(Boolean, nullable=False, default=False, server_default=text("false"))
     extraction_method = Column(Enum(ExtractionMethod), default=ExtractionMethod.GEMINI)
     status = Column(Enum(AuditStatus), default=AuditStatus.PENDING)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-    bill_items = relationship("BillItem", back_populates="audit", cascade="all, delete-orphan")
+    bill_items = relationship(
+        "BillItem",
+        back_populates="audit",
+        cascade="all, delete-orphan",
+        order_by="BillItem.position",
+    )
     findings = relationship("AuditFinding", back_populates="audit", cascade="all, delete-orphan")
     reports = relationship("Report", back_populates="audit", cascade="all, delete-orphan")
 
@@ -63,11 +74,13 @@ class BillItem(Base):
     id = Column(String, primary_key=True, index=True)
     audit_id = Column(String, ForeignKey("audits.id", ondelete="CASCADE"), nullable=False, index=True)
     description = Column(Text, nullable=True)
+    position = Column(Integer, nullable=False, default=0, server_default=text("0"))
     service_date = Column(Date, nullable=True)
     quantity = Column(Numeric(10, 2), nullable=True)
     unit_price = Column(Numeric(12, 2), nullable=True)
     billed_total = Column(Numeric(12, 2), nullable=True)
     expected_total = Column(Numeric(12, 2), nullable=True)
+    extraction_confidence = Column(Numeric(3, 2), nullable=True)
     category = Column(String, nullable=True)
     is_flagged = Column(Integer, default=0)
 
@@ -89,6 +102,10 @@ class AuditFinding(Base):
     expected_value = Column(Numeric(12, 2), nullable=True)
     actual_value = Column(Numeric(12, 2), nullable=True)
     estimated_difference = Column(Numeric(12, 2), nullable=True)
+    source_name = Column(String, nullable=True)
+    source_url = Column(Text, nullable=True)
+    source_date = Column(Date, nullable=True)
+    applicability_notes = Column(Text, nullable=True)
     status = Column(String, default="open")
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 

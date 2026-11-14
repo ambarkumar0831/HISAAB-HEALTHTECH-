@@ -39,6 +39,11 @@ export interface AuditFinding {
   expected_value?: number | null;
   actual_value?: number | null;
   estimated_difference?: number | null;
+  bill_item_id?: string | null;
+  source_name?: string | null;
+  source_url?: string | null;
+  source_date?: string | null;
+  applicability_notes?: string | null;
   status: string;
 }
 
@@ -50,6 +55,8 @@ export interface BillItemOut {
   unit_price?: number | null;
   billed_total?: number | null;
   expected_total?: number | null;
+  extraction_confidence?: number | null;
+  position: number;
   category?: string | null;
   is_flagged: boolean;
 }
@@ -64,6 +71,26 @@ export interface AuditOut {
   discharge_date?: string | null;
   original_total?: number | null;
   calculated_total?: number | null;
+  subtotal?: number | null;
+  discount?: number | null;
+  tax?: number | null;
+  uncertain_fields: string[];
+  benchmark_review?: {
+    benchmarks_checked: number;
+    source_name?: string | null;
+    source_url?: string | null;
+    comparisons: Array<{
+      bill_item_index: number;
+      item_name?: string | null;
+      unit_price: number;
+      reference_rate: number;
+      effective_from?: string | null;
+      effective_until?: string | null;
+      applicability_notes: string;
+    }>;
+    not_checked_reason?: string | null;
+  } | null;
+  extraction_confirmed: boolean;
   extraction_method: string;
   status: string;
   created_at?: string | null;

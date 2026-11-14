@@ -9,7 +9,7 @@ from app.models.schemas import BillExtraction, BillItemExtract
 from app.services.audit_engine import AuditEngine
 
 
-def _extraction(items, grand_total, subtotal=None, discount=0, tax=0):
+def _extraction(items, grand_total, subtotal=None, discount=0, tax=0, **overrides):
     return BillExtraction(
         hospital_name="Test Hospital",
         bill_number="BILL-TEST",
@@ -19,6 +19,7 @@ def _extraction(items, grand_total, subtotal=None, discount=0, tax=0):
         tax=tax,
         grand_total=grand_total,
         extraction_method="GEMINI",
+        **overrides,
     )
 
 
@@ -207,6 +208,123 @@ def test_missing_values_cannot_be_verified():
     # No arithmetic findings because values are missing
     item_mismatches = [f for f in arith if f["reason_code"] == "ITEM_TOTAL_MISMATCH"]
     assert len(item_mismatches) == 0
+    assert result["arithmetic"]["item_checks"][0]["status"] == "NOT_CHECKED"
+
+
+def test_missing_discount_and_tax_are_not_assumed_zero():
+    result = AuditEngine().audit(_extraction(
+        [BillItemExtract(item_name="Lab", quantity=1, unit_price=500, total=500)],
+        grand_total=500,
+        discount=None,
+        tax=None,
+    ))
+
+    assert result["calculated_total"] is None
+    assert result["arithmetic"]["total_status"] == "NOT_CHECKED"
+    assert not any(
+        finding.get("reason_code") == "GRAND_TOTAL_MISMATCH"
+        for finding in result["findings"]
+    )
+
+
+def test_uncertain_extraction_is_a_confirmation_prompt():
+    result = AuditEngine().audit(_extraction(
+        [BillItemExtract(item_name="Lab", quantity=1, unit_price=500, total=500, confidence=0.4)],
+        grand_total=500,
+        uncertain_fields=["grand_total"],
+    ))
+
+    uncertainty = [
+        finding for finding in result["findings"]
+        if finding.get("reason_code") == "EXTRACTION_UNCERTAINTY"
+    ]
+    assert len(uncertainty) == 1
+    assert uncertainty[0]["title"] == "Confirm extracted grand total"
+    unclear_item = next(
+        finding for finding in result["findings"]
+        if finding.get("reason_code") == "UNCLEAR_CHARGE"
+    )
+    assert unclear_item["bill_item_index"] == 0
+
+
+def test_benchmark_check_requires_citation_and_compares_unit_rate_with_a_cap():
+    class SyntheticBenchmarkService:
+        def list_benchmarks(self):
+            return [
+                {
+                    "service_name": f"Synthetic service {index}",
+                    "normalized_service_name": f"synthetic service {index}",
+                    "rate": 100,
+                    "source_name": "Published synthetic schedule",
+                    "source_url": "https://example.test/rates",
+                    "effective_from": "2025-01-01",
+                    "effective_until": None,
+                    "applicability_notes": "Example-only reference.",
+                }
+                for index in range(6)
+            ] + [{
+                "service_name": "Synthetic service 0",
+                "normalized_service_name": "synthetic service 0",
+                "rate": 1,
+                "source_name": "Uncited schedule",
+                "source_url": None,
+                "effective_from": "2025-01-01",
+            }]
+
+        def find_matching_benchmark(self, service_name, benchmarks):
+            return next(
+                (benchmark for benchmark in benchmarks if benchmark["service_name"] == service_name),
+                None,
+            )
+
+    items = [
+        BillItemExtract(
+            item_name=f"Synthetic service {index}",
+            quantity=10,
+            unit_price=120,
+            total=1200,
+        )
+        for index in range(6)
+    ]
+    result = AuditEngine(SyntheticBenchmarkService()).audit(_extraction(
+        items,
+        grand_total=7200,
+        bill_date="2025-01-03",
+    ))
+
+    benchmark = result["benchmark"]
+    assert benchmark["benchmarks_checked"] == 5
+    assert benchmark["source_name"] == "Published synthetic schedule"
+    assert len(benchmark["comparisons"]) == 5
+    assert benchmark["comparisons"][0]["unit_price"] == 120
+    assert all(finding["expected_value"] == 100 for finding in benchmark["findings"])
+
+
+def test_benchmark_check_requires_bill_date_within_source_period():
+    class SyntheticBenchmarkService:
+        def list_benchmarks(self):
+            return [{
+                "service_name": "Synthetic service",
+                "normalized_service_name": "synthetic service",
+                "rate": 100,
+                "source_name": "Published synthetic schedule",
+                "source_url": "https://example.test/rates",
+                "effective_from": "2025-01-01",
+                "effective_until": "2025-12-31",
+            }]
+
+        def find_matching_benchmark(self, service_name, benchmarks):
+            return benchmarks[0] if benchmarks else None
+
+    result = AuditEngine(SyntheticBenchmarkService()).audit(_extraction(
+        [BillItemExtract(item_name="Synthetic service", quantity=1, unit_price=120, total=120)],
+        grand_total=120,
+        bill_date="2024-12-31",
+    ))
+
+    assert result["benchmark"]["benchmarks_checked"] == 0
+    assert result["benchmark"]["comparisons"] == []
+    assert not any(f["finding_type"] == "BENCHMARK" for f in result["findings"])
 
 
 if __name__ == "__main__":
@@ -221,4 +339,8 @@ if __name__ == "__main__":
     test_unclear_charge_missing_description()
     test_no_double_counting_in_summary()
     test_missing_values_cannot_be_verified()
+    test_missing_discount_and_tax_are_not_assumed_zero()
+    test_uncertain_extraction_is_a_confirmation_prompt()
+    test_benchmark_check_requires_citation_and_compares_unit_rate_with_a_cap()
+    test_benchmark_check_requires_bill_date_within_source_period()
     print("All audit engine tests passed!")

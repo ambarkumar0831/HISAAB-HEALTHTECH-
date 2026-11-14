@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List, Optional, Any
+from typing import Annotated, List, Optional, Any
 from pydantic import BaseModel, Field, ConfigDict, field_serializer
 
 
@@ -22,7 +22,7 @@ class BillItemExtract(BaseModel):
     unit_price: Optional[float] = Field(None, description="Unit price of the item")
     total: Optional[float] = Field(None, description="Billed total for the item")
     category: Optional[str] = Field(None, description="Service category")
-    confidence: Optional[float] = Field(None, description="Extraction confidence 0-1")
+    confidence: Optional[float] = Field(None, ge=0, le=1, description="Extraction confidence 0-1")
 
 
 class BillExtraction(BaseModel):
@@ -48,6 +48,10 @@ class BillExtraction(BaseModel):
     extraction_method: str = "GEMINI"
 
 
+class AppealQuestions(BaseModel):
+    questions: List[Annotated[str, Field(max_length=1000)]] = Field(default_factory=list, max_length=50)
+
+
 # ---------- Audit finding schema ----------
 
 class AuditFindingOut(BaseModel):
@@ -63,6 +67,11 @@ class AuditFindingOut(BaseModel):
     expected_value: Optional[float] = None
     actual_value: Optional[float] = None
     estimated_difference: Optional[float] = None
+    bill_item_id: Optional[str] = None
+    source_name: Optional[str] = None
+    source_url: Optional[str] = None
+    source_date: Optional[date] = None
+    applicability_notes: Optional[str] = None
     status: str
     created_at: Optional[datetime] = None
 
@@ -83,6 +92,8 @@ class BillItemOut(BaseModel):
     unit_price: Optional[float] = None
     billed_total: Optional[float] = None
     expected_total: Optional[float] = None
+    extraction_confidence: Optional[float] = None
+    position: int = 0
     category: Optional[str] = None
     is_flagged: bool = False
 
@@ -116,8 +127,14 @@ class AuditOut(BaseModel):
     patient_name: Optional[str] = None
     admission_date: Optional[date] = None
     discharge_date: Optional[date] = None
+    subtotal: Optional[float] = None
+    discount: Optional[float] = None
+    tax: Optional[float] = None
     original_total: Optional[float] = None
     calculated_total: Optional[float] = None
+    uncertain_fields: List[str] = Field(default_factory=list)
+    benchmark_review: Optional[dict] = None
+    extraction_confirmed: bool = False
     extraction_method: str
     status: str
     created_at: Optional[datetime] = None

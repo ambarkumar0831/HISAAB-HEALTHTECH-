@@ -48,6 +48,9 @@ const questionForFinding = (findingType: string) => {
   return questions[findingType] || "Could you help me understand this item in my bill?";
 };
 
+const reviewStatus = (findingType: string) =>
+  findingType === "ARITHMETIC" ? "Calculation check failed" : "Needs confirmation";
+
 export default function AuditResults() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -57,6 +60,8 @@ export default function AuditResults() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [downloading, setDownloading] = useState<"report" | "appeal" | null>(null);
   const [rerunning, setRerunning] = useState(false);
+  const [questions, setQuestions] = useState<Record<string, string>>({});
+  const [customQuestions, setCustomQuestions] = useState<string[]>([]);
 
   const loadAudit = useCallback(async () => {
     if (!id) {
@@ -68,7 +73,14 @@ export default function AuditResults() {
     setLoading(true);
     setLoadError(null);
     try {
-      setAudit(await auditApi.get(id));
+      const loadedAudit = await auditApi.get(id);
+      setAudit(loadedAudit);
+      setQuestions(Object.fromEntries(
+        (loadedAudit.findings || []).map((finding) => [
+          finding.id,
+          questionForFinding(finding.finding_type),
+        ]),
+      ));
     } catch (requestError: unknown) {
       setLoadError(requestError instanceof Error ? requestError.message : "Could not load this audit.");
     } finally {
@@ -85,7 +97,12 @@ export default function AuditResults() {
     setActionError(null);
     setDownloading(type);
     try {
-      const file = type === "report" ? await auditApi.report(audit.id) : await auditApi.appeal(audit.id);
+      const file = type === "report"
+        ? await auditApi.report(audit.id)
+        : await auditApi.appeal(audit.id, [
+            ...findings.map((finding) => questions[finding.id] ?? questionForFinding(finding.finding_type)),
+            ...customQuestions,
+          ].map((question) => question.trim()).filter(Boolean));
       const objectUrl = URL.createObjectURL(file);
       const link = document.createElement("a");
       link.href = objectUrl;
@@ -107,7 +124,14 @@ export default function AuditResults() {
     setRerunning(true);
     try {
       await auditApi.analyze(audit.id);
-      setAudit(await auditApi.get(audit.id));
+      const updatedAudit = await auditApi.get(audit.id);
+      setAudit(updatedAudit);
+      setQuestions(Object.fromEntries(
+        (updatedAudit.findings || []).map((finding) => [
+          finding.id,
+          questionForFinding(finding.finding_type),
+        ]),
+      ));
     } catch (rerunError: unknown) {
       setActionError(rerunError instanceof Error ? rerunError.message : "Could not rerun this review.");
     } finally {
@@ -149,6 +173,10 @@ export default function AuditResults() {
     audit.original_total != null && audit.calculated_total != null
       ? Math.abs(audit.original_total - audit.calculated_total)
       : null;
+  const subtotalIsComplete = items.length > 0 && items.every((item) => item.expected_total != null);
+  const calculatedSubtotal = subtotalIsComplete
+    ? items.reduce((total, item) => total + (item.expected_total || 0), 0)
+    : null;
 
   return (
     <div className="mx-auto max-w-6xl space-y-6">
@@ -220,9 +248,30 @@ export default function AuditResults() {
 
       {totalDifference != null && (
         <p className="-mt-3 px-1 text-[11px] leading-5 text-slate-500">
-          The calculated amount uses quantities and unit prices that could be extracted. Tax, discounts, or other charges may explain a difference; check the original bill before drawing conclusions.
+          Compare the calculation with the original bill. Differences are prompts to clarify, not proof of an error.
         </p>
       )}
+
+      <section className="rounded-[1.4rem] border border-[#e4ece5] bg-white p-5 sm:p-6" aria-labelledby="calculation-title">
+        <h2 id="calculation-title" className="font-serif text-xl font-bold text-dark-teal">How the total was checked</h2>
+        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          {[
+            ["Line subtotal (quantity × unit price)", formatMoney(calculatedSubtotal)],
+            ["Subtotal printed on bill", formatMoney(audit.subtotal)],
+            ["Discount", audit.discount == null ? "Not extracted" : `− ${formatMoney(audit.discount)}`],
+            ["Tax", audit.tax == null ? "Not extracted" : `+ ${formatMoney(audit.tax)}`],
+            ["Calculated final total", audit.calculated_total == null ? "Not checked" : formatMoney(audit.calculated_total)],
+          ].map(([label, value]) => (
+            <div key={label} className="rounded-xl bg-[#f7faf6] p-3">
+              <p className="text-[10px] font-semibold leading-4 text-slate-500">{label}</p>
+              <p className="mt-1 text-sm font-bold text-dark-teal">{value}</p>
+            </div>
+          ))}
+        </div>
+        <p className="mt-3 text-[11px] leading-5 text-slate-500">
+          Formula: line subtotal − discount + tax. A final total is shown only when the necessary line amounts, discount, and tax were extracted; missing values are not assumed to be zero.
+        </p>
+      </section>
 
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(300px,0.85fr)]">
         <section className="min-w-0 rounded-[1.7rem] border border-[#e4ece5] bg-white p-5 shadow-[0_18px_55px_-48px_rgba(18,59,59,0.45)] sm:p-6">
@@ -252,13 +301,14 @@ export default function AuditResults() {
               </thead>
               <tbody>
                 {items.map((item: BillItemOut) => {
-                  const mismatch =
+                  const missingValues = item.quantity == null || item.unit_price == null || item.billed_total == null;
+                  const mismatch = !missingValues &&
                     item.billed_total != null &&
                     item.expected_total != null &&
                     Math.abs(item.billed_total - item.expected_total) > 0.01;
                   const status = item.is_flagged || mismatch
                     ? "Check total"
-                    : item.expected_total == null
+                    : missingValues || item.expected_total == null
                       ? "Not compared"
                       : "Matches";
                   const statusStyle = status === "Check total"
@@ -272,6 +322,11 @@ export default function AuditResults() {
                       <td className="max-w-[240px] px-3 py-3 font-medium text-slate-800">
                         <span className="block truncate">{item.description || "Unidentified item"}</span>
                         {item.category && <span className="mt-0.5 block text-[10px] font-normal text-slate-500">{item.category}</span>}
+                        {item.extraction_confidence != null && (
+                          <span className={`mt-0.5 block text-[10px] font-normal ${item.extraction_confidence < 0.75 ? "text-amber-700" : "text-slate-500"}`}>
+                            Extraction confidence: {Math.round(item.extraction_confidence * 100)}%
+                          </span>
+                        )}
                       </td>
                       <td className="px-3 py-3 text-right text-slate-600">{item.quantity ?? "—"}</td>
                       <td className="px-3 py-3 text-right text-slate-600">{formatMoney(item.unit_price)}</td>
@@ -328,17 +383,43 @@ export default function AuditResults() {
                       {finding.description && (
                         <p className="mt-2 text-xs leading-5 text-slate-600">{finding.description}</p>
                       )}
+                      <p className="mt-2 text-[10px] font-semibold text-slate-500">
+                        {reviewStatus(finding.finding_type)}
+                        {finding.bill_item_id && items.find((item) => item.id === finding.bill_item_id)
+                          ? ` · ${items.find((item) => item.id === finding.bill_item_id)?.description || "Related bill item"}`
+                          : ""}
+                      </p>
                       {finding.estimated_difference != null && (
                         <p className="mt-2 text-xs font-semibold text-slate-700">
                           Amount to clarify: {formatMoney(finding.estimated_difference)}
                         </p>
                       )}
                       <div className="mt-3 rounded-xl bg-[#f1f6f1] p-3">
-                        <p className="flex items-start gap-2 text-[11px] leading-5 text-slate-700">
+                        <label className="block text-[11px] font-semibold text-slate-700">
                           <MessageCircle size={14} className="mt-0.5 shrink-0 text-deep-sage" />
-                          <span><strong>One way to ask:</strong> {questionForFinding(finding.finding_type)}</span>
-                        </p>
+                          <span className="ml-1 align-middle">Edit a question for the hospital</span>
+                          <textarea
+                            value={questions[finding.id] ?? questionForFinding(finding.finding_type)}
+                            onChange={(event) => {
+                              const value = event.currentTarget.value;
+                              setQuestions((current) => ({ ...current, [finding.id]: value }));
+                            }}
+                            rows={2}
+                            className="mt-2 w-full resize-y rounded-lg border border-[#dfe8df] bg-white p-2.5 text-xs font-normal leading-5 text-slate-700 outline-none focus:border-deep-sage focus:ring-2 focus:ring-deep-sage/20"
+                          />
+                        </label>
                       </div>
+                      {finding.finding_type === "BENCHMARK" && finding.source_url && (
+                        <p className="mt-2 text-[10px] leading-5 text-slate-500">
+                          Reference: {finding.source_name || "Published source"}
+                          {finding.source_date ? ` · effective ${finding.source_date}` : ""}
+                          {" · "}
+                          <a href={finding.source_url} target="_blank" rel="noreferrer" className="font-semibold text-deep-sage underline">
+                            View source
+                          </a>
+                          {finding.applicability_notes ? ` · ${finding.applicability_notes}` : ""}
+                        </p>
+                      )}
                     </article>
                   ))}
                 </div>
@@ -352,6 +433,32 @@ export default function AuditResults() {
               </div>
             )}
 
+            <div className="mt-5 border-t border-[#e8eee8] pt-4">
+              <h3 className="text-sm font-semibold text-dark-teal">Additional hospital questions</h3>
+              {customQuestions.map((question, index) => (
+                <label key={index} className="mt-2 block text-[11px] font-medium text-slate-600">
+                  Question {index + 1}
+                  <textarea
+                    value={question}
+                    onChange={(event) => {
+                      const value = event.currentTarget.value;
+                      setCustomQuestions((current) => current.map((existing, rowIndex) =>
+                        rowIndex === index ? value : existing));
+                    }}
+                    rows={2}
+                    className="mt-1.5 w-full resize-y rounded-lg border border-[#dfe8df] bg-white p-2.5 text-xs leading-5 text-slate-700 outline-none focus:border-deep-sage focus:ring-2 focus:ring-deep-sage/20"
+                  />
+                </label>
+              ))}
+              <button
+                type="button"
+                onClick={() => setCustomQuestions((current) => [...current, "Could you provide an itemized explanation for this charge?"])}
+                className="mt-2 text-xs font-semibold text-deep-sage hover:text-dark-teal"
+              >
+                + Add a question
+              </button>
+            </div>
+
             <button
               type="button"
               onClick={() => void rerunAudit()}
@@ -364,6 +471,36 @@ export default function AuditResults() {
           </div>
         </section>
       </div>
+
+      {audit.benchmark_review && (
+        <section className="rounded-[1.4rem] border border-[#e4ece5] bg-white p-5 sm:p-6">
+          <h2 className="font-serif text-lg font-bold text-dark-teal">Published rate reference</h2>
+          {audit.benchmark_review.source_url ? (
+            <>
+              <p className="mt-2 text-xs leading-5 text-slate-600">
+                Compared {audit.benchmark_review.benchmarks_checked} unit rate{audit.benchmark_review.benchmarks_checked === 1 ? "" : "s"} with{" "}
+                <a href={audit.benchmark_review.source_url} target="_blank" rel="noreferrer" className="font-semibold text-deep-sage underline">
+                  {audit.benchmark_review.source_name || "the published source"}
+                </a>
+                . Comparisons are references only; applicability to this patient, provider, location, and plan is not verified.
+              </p>
+              <ul className="mt-3 space-y-2">
+                {audit.benchmark_review.comparisons.map((comparison, index) => (
+                  <li key={`${comparison.bill_item_index}-${index}`} className="rounded-lg bg-[#f7faf6] px-3 py-2 text-xs text-slate-700">
+                    <strong>{comparison.item_name || "Bill item"}</strong>: billed unit price {formatMoney(comparison.unit_price)}; reference {formatMoney(comparison.reference_rate)}
+                    {comparison.effective_from ? ` · effective ${comparison.effective_from}${comparison.effective_until ? ` through ${comparison.effective_until}` : ""}` : ""}
+                    {comparison.applicability_notes ? <span className="block mt-1 text-[10px] text-slate-500">{comparison.applicability_notes}</span> : null}
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <p className="mt-2 text-xs leading-5 text-slate-600">
+              {audit.benchmark_review.not_checked_reason || "No eligible source-backed rate was available for comparison."}
+            </p>
+          )}
+        </section>
+      )}
 
       <section className="rounded-[1.7rem] border border-[#e4ece5] bg-[#f5f8f4] p-5 sm:p-6">
         <h2 className="font-serif text-lg font-bold text-dark-teal">Review details</h2>
