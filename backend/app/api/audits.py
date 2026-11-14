@@ -141,7 +141,6 @@ async def extract_bill(
         raise HTTPException(status_code=404, detail="Uploaded file not found")
 
     gemini = GeminiService()
-    ocr = OCRService()
     extraction: Optional[BillExtraction] = None
     method = "GEMINI"
 
@@ -150,11 +149,14 @@ async def extract_bill(
         import mimetypes
         mime, _ = mimetypes.guess_type(file_path)
         extraction = await gemini.extract_bill(file_path, mime or "application/octet-stream")
+        if not extraction.items and extraction.grand_total is None:
+            raise ValueError("Gemini returned no line items or final total")
         method = "GEMINI"
     except Exception as gemini_exc:
         logger.warning(f"Gemini failed for audit {audit_id}: {gemini_exc}")
         # Fallback to Tesseract
         try:
+            ocr = OCRService()
             extraction = await ocr.extract_bill(file_path)
             method = "TESSERACT"
         except Exception as ocr_exc:

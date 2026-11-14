@@ -391,6 +391,11 @@ export default function Upload() {
                       <p className="mt-1 text-xs leading-5 text-slate-600">
                         Check these values against the original. The review will not run until you confirm them.
                       </p>
+                      {extraction.extraction_method === "TESSERACT" && (
+                        <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2.5 text-xs leading-5 text-amber-900">
+                          Gemini extraction failed, so fallback OCR was used. Please verify every extracted value against the original bill before continuing.
+                        </p>
+                      )}
                     </div>
 
                     <div className="grid gap-3 sm:grid-cols-2">
