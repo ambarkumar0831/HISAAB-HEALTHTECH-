@@ -31,25 +31,40 @@ const formatDate = (value: string | null | undefined) => {
 
 const findingLabels: Record<string, string> = {
   ARITHMETIC: "Arithmetic",
+  TOTAL_NOT_VERIFIED: "Total verification",
   DUPLICATE: "Possible duplicate",
   BENCHMARK: "Benchmark",
   DATE_CHECK: "Date check",
   UNCLEAR_CHARGE: "Unclear charge",
+  EXTRACTION_UNCERTAINTY: "Extraction check",
 };
 
-const questionForFinding = (findingType: string) => {
+const findingCategory = (finding: Pick<AuditFinding, "finding_type" | "reason_code">) => {
+  if (finding.reason_code === "TOTAL_NOT_VERIFIED") return "TOTAL_NOT_VERIFIED";
+  if (finding.reason_code === "EXTRACTION_UNCERTAINTY") return "EXTRACTION_UNCERTAINTY";
+  return finding.finding_type;
+};
+
+const questionForFinding = (finding: Pick<AuditFinding, "finding_type" | "reason_code">) => {
+  const category = findingCategory(finding);
   const questions: Record<string, string> = {
     ARITHMETIC: "Could you help me understand how this line amount was calculated?",
+    TOTAL_NOT_VERIFIED: "Could you confirm whether tax or another adjustment applies to this total?",
     DUPLICATE: "Are these entries for separate services? Could you share the dates or details?",
     BENCHMARK: "Could you confirm which rate or package applies to this service?",
     DATE_CHECK: "Could you confirm the date and billing period for this entry?",
     UNCLEAR_CHARGE: "Could you provide an itemized description of this charge?",
+    EXTRACTION_UNCERTAINTY: "Could you confirm this detail against the original bill?",
   };
-  return questions[findingType] || "Could you help me understand this item in my bill?";
+  return questions[category] || "Could you help me understand this item in my bill?";
 };
 
-const reviewStatus = (findingType: string) =>
-  findingType === "ARITHMETIC" ? "Calculation check failed" : "Needs confirmation";
+const reviewStatus = (finding: Pick<AuditFinding, "finding_type" | "reason_code">) => {
+  const category = findingCategory(finding);
+  if (category === "TOTAL_NOT_VERIFIED") return "Needs review — total not fully verified";
+  if (category === "EXTRACTION_UNCERTAINTY") return "Compare with the original bill";
+  return category === "ARITHMETIC" ? "Calculation check failed" : "Needs confirmation";
+};
 
 export default function AuditResults() {
   const { id } = useParams<{ id: string }>();
@@ -78,7 +93,7 @@ export default function AuditResults() {
       setQuestions(Object.fromEntries(
         (loadedAudit.findings || []).map((finding) => [
           finding.id,
-          questionForFinding(finding.finding_type),
+          questionForFinding(finding),
         ]),
       ));
     } catch (requestError: unknown) {
@@ -100,7 +115,7 @@ export default function AuditResults() {
       const file = type === "report"
         ? await auditApi.report(audit.id)
         : await auditApi.appeal(audit.id, [
-            ...findings.map((finding) => questions[finding.id] ?? questionForFinding(finding.finding_type)),
+            ...findings.map((finding) => questions[finding.id] ?? questionForFinding(finding)),
             ...customQuestions,
           ].map((question) => question.trim()).filter(Boolean));
       const objectUrl = URL.createObjectURL(file);
@@ -129,7 +144,7 @@ export default function AuditResults() {
       setQuestions(Object.fromEntries(
         (updatedAudit.findings || []).map((finding) => [
           finding.id,
-          questionForFinding(finding.finding_type),
+          questionForFinding(finding),
         ]),
       ));
     } catch (rerunError: unknown) {
@@ -166,13 +181,17 @@ export default function AuditResults() {
   const items = audit.bill_items || [];
   const findings = audit.findings || [];
   const counts = findings.reduce<Record<string, number>>((accumulator, finding) => {
-    accumulator[finding.finding_type] = (accumulator[finding.finding_type] || 0) + 1;
+    const category = findingCategory(finding);
+    accumulator[category] = (accumulator[category] || 0) + 1;
     return accumulator;
   }, {});
+  const totalVerificationFinding = findings.find(
+    (finding) => finding.reason_code === "TOTAL_NOT_VERIFIED",
+  );
   const totalDifference =
     audit.original_total != null && audit.calculated_total != null
       ? Math.abs(audit.original_total - audit.calculated_total)
-      : null;
+      : totalVerificationFinding?.estimated_difference ?? null;
   const subtotalIsComplete = items.length > 0 && items.every((item) => item.expected_total != null);
   const calculatedSubtotal = subtotalIsComplete
     ? items.reduce((total, item) => total + (item.expected_total || 0), 0)
@@ -271,6 +290,12 @@ export default function AuditResults() {
         <p className="mt-3 text-[11px] leading-5 text-slate-500">
           Formula: line subtotal − discount + tax. A final total is shown only when the necessary line amounts, discount, and tax were extracted; missing values are not assumed to be zero.
         </p>
+        {totalVerificationFinding && (
+          <p role="status" className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-900">
+            <strong>Needs review — total not fully verified.</strong>{" "}
+            {totalVerificationFinding.description}
+          </p>
+        )}
       </section>
 
       <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1.55fr)_minmax(300px,0.85fr)]">
@@ -322,11 +347,6 @@ export default function AuditResults() {
                       <td className="max-w-[240px] px-3 py-3 font-medium text-slate-800">
                         <span className="block truncate">{item.description || "Unidentified item"}</span>
                         {item.category && <span className="mt-0.5 block text-[10px] font-normal text-slate-500">{item.category}</span>}
-                        {item.extraction_confidence != null && (
-                          <span className={`mt-0.5 block text-[10px] font-normal ${item.extraction_confidence < 0.75 ? "text-amber-700" : "text-slate-500"}`}>
-                            Extraction confidence: {Math.round(item.extraction_confidence * 100)}%
-                          </span>
-                        )}
                       </td>
                       <td className="px-3 py-3 text-right text-slate-600">{item.quantity ?? "—"}</td>
                       <td className="px-3 py-3 text-right text-slate-600">{formatMoney(item.unit_price)}</td>
@@ -362,7 +382,7 @@ export default function AuditResults() {
             {findings.length > 0 ? (
               <>
                 <div className="mt-4 flex flex-wrap gap-2">
-                  {Object.entries(findingLabels).map(([type, label]) => (
+                  {Object.entries(findingLabels).filter(([type]) => (counts[type] || 0) > 0).map(([type, label]) => (
                     <span key={type} className="rounded-full bg-[#f3f6f2] px-2.5 py-1 text-[10px] font-medium text-slate-600">
                       {label}: {counts[type] || 0}
                     </span>
@@ -374,7 +394,7 @@ export default function AuditResults() {
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div>
                           <span className="text-[9px] font-bold uppercase tracking-[0.12em] text-deep-sage">
-                            {findingLabels[finding.finding_type] || "Review"}
+                            {findingLabels[findingCategory(finding)] || "Review"}
                           </span>
                           <h3 className="mt-1 text-sm font-semibold leading-5 text-dark-teal">{finding.title}</h3>
                         </div>
@@ -384,7 +404,7 @@ export default function AuditResults() {
                         <p className="mt-2 text-xs leading-5 text-slate-600">{finding.description}</p>
                       )}
                       <p className="mt-2 text-[10px] font-semibold text-slate-500">
-                        {reviewStatus(finding.finding_type)}
+                        {reviewStatus(finding)}
                         {finding.bill_item_id && items.find((item) => item.id === finding.bill_item_id)
                           ? ` · ${items.find((item) => item.id === finding.bill_item_id)?.description || "Related bill item"}`
                           : ""}
@@ -399,7 +419,7 @@ export default function AuditResults() {
                           <MessageCircle size={14} className="mt-0.5 shrink-0 text-deep-sage" />
                           <span className="ml-1 align-middle">Edit a question for the hospital</span>
                           <textarea
-                            value={questions[finding.id] ?? questionForFinding(finding.finding_type)}
+                            value={questions[finding.id] ?? questionForFinding(finding)}
                             onChange={(event) => {
                               const value = event.currentTarget.value;
                               setQuestions((current) => ({ ...current, [finding.id]: value }));
@@ -459,14 +479,24 @@ export default function AuditResults() {
               </button>
             </div>
 
+            <p className="mt-5 text-[11px] leading-5 text-slate-500">
+              Rerunning checks uses the extraction already saved for this audit; it does not read the bill again.
+            </p>
+            <Link
+              to="/upload"
+              className="btn-outline mt-3 min-h-10 w-full justify-center text-xs"
+            >
+              <FileText size={15} />
+              Upload bill again for a fresh extraction
+            </Link>
             <button
               type="button"
               onClick={() => void rerunAudit()}
               disabled={rerunning}
-              className="btn-outline mt-5 min-h-10 w-full justify-center text-xs disabled:cursor-wait disabled:opacity-60"
+              className="btn-outline mt-2 min-h-10 w-full justify-center text-xs disabled:cursor-wait disabled:opacity-60"
             >
               {rerunning ? <Loader2 size={15} className="animate-spin" /> : <RefreshCw size={15} />}
-              {rerunning ? "Checking again…" : "Rerun checks"}
+              {rerunning ? "Checking again…" : "Rerun checks on saved extraction"}
             </button>
           </div>
         </section>

@@ -44,3 +44,15 @@ def test_gemini_schema_omits_defaults_and_parsed_model_keeps_them(monkeypatch):
 
     assert extraction.currency == "INR"
     assert extraction.extraction_method == "GEMINI"
+
+
+def test_gemini_confidence_is_not_reported_as_calibrated():
+    service = GeminiService()
+    extraction = service._parse_and_validate(
+        '{"items": [{"item_name": "CBC", "confidence": 1.0}], "uncertain_fields": []}'
+    )
+
+    assert extraction.items[0].confidence is None
+    prompt = service._build_extraction_prompt().lower()
+    assert "confidence" not in prompt
+    assert "do not infer them from the final total" in prompt

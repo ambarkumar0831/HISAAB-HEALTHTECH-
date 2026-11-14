@@ -83,7 +83,7 @@ class AuditEngine:
                 "possible_duplicate_amount": float(possible_dup_amount),
                 "potential_benchmark_difference": float(benchmark_diff),
                 "total_findings": len(findings),
-                "items_requiring_manual_review": len(unclear["findings"]),
+                "items_requiring_manual_review": unclear["unclear_count"],
             },
         }
 
@@ -94,8 +94,15 @@ class AuditEngine:
     ) -> Dict[str, Any]:
         findings = []
         item_level_diffs = []
+        uncertain_fields = {
+            "_".join(field.strip().lower().replace("-", " ").split())
+            for field in extraction.uncertain_fields or []
+        }
         calculated_subtotal = Decimal("0")
-        subtotal_complete = bool(items)
+        item_amounts_uncertain = bool(
+            uncertain_fields.intersection({"items", "quantity", "unit_price", "total", "billed_total"})
+        )
+        subtotal_complete = bool(items) and not item_amounts_uncertain
 
         for idx, item in enumerate(items):
             qty = _to_decimal(item.quantity)
@@ -155,7 +162,9 @@ class AuditEngine:
                 })
 
         # Subtotal check
-        extracted_subtotal = _to_decimal(extraction.subtotal)
+        extracted_subtotal = (
+            None if "subtotal" in uncertain_fields else _to_decimal(extraction.subtotal)
+        )
         subtotal_diff = None
         if extracted_subtotal is not None and subtotal_complete:
             subtotal_diff = _money(extracted_subtotal - calculated_subtotal)
@@ -176,9 +185,11 @@ class AuditEngine:
                 })
 
         # Grand total check: subtotal - discount + tax
-        discount = _to_decimal(extraction.discount)
-        tax = _to_decimal(extraction.tax)
-        grand_total = _to_decimal(extraction.grand_total)
+        discount = None if "discount" in uncertain_fields else _to_decimal(extraction.discount)
+        tax = None if "tax" in uncertain_fields else _to_decimal(extraction.tax)
+        grand_total = (
+            None if "grand_total" in uncertain_fields else _to_decimal(extraction.grand_total)
+        )
 
         expected_grand = (
             _money(calculated_subtotal - discount + tax)
@@ -204,6 +215,59 @@ class AuditEngine:
                     "estimated_difference": float(abs(grand_diff)),
                     "status": "open",
                 })
+        elif grand_total is not None:
+            missing_components = []
+            if not subtotal_complete:
+                missing_components.append("complete line-item amounts")
+            if discount is None:
+                missing_components.append("discount")
+            if tax is None:
+                missing_components.append("tax")
+
+            possible_difference = None
+            missing_adjustments = int(discount is None) + int(tax is None)
+            if subtotal_complete and missing_adjustments == 1:
+                known_total = calculated_subtotal
+                if discount is not None:
+                    known_total -= discount
+                if tax is not None:
+                    known_total += tax
+                difference = _money(grand_total - known_total)
+                if difference != 0:
+                    possible_difference = abs(difference)
+                    description = (
+                        f"The printed total is ₹{grand_total}, while the extracted amounts total "
+                        f"₹{known_total} before the missing {missing_components[-1]} is considered "
+                        f"(a possible ₹{possible_difference} difference). This is not a confirmed "
+                        "arithmetic error; confirm whether another adjustment applies."
+                    )
+                else:
+                    description = (
+                        "The known amounts currently agree with the printed total, but the "
+                        f"{missing_components[-1]} was not extracted. Confirm whether it is absent "
+                        "or whether another adjustment applies."
+                    )
+            else:
+                description = (
+                    "The final total could not be fully verified because "
+                    f"{', '.join(missing_components) or 'required amounts'} were not extracted. "
+                    "Confirm whether tax or another adjustment applies."
+                )
+
+            findings.append({
+                "finding_type": "ARITHMETIC",
+                "title": "Total not fully verified",
+                "description": description,
+                "reason_code": "TOTAL_NOT_VERIFIED",
+                "severity": "LOW",
+                "confidence": None,
+                "expected_value": None,
+                "actual_value": float(grand_total),
+                "estimated_difference": (
+                    float(possible_difference) if possible_difference is not None else None
+                ),
+                "status": "open",
+            })
 
         return {
             "calculated_subtotal": float(calculated_subtotal),
@@ -216,8 +280,12 @@ class AuditEngine:
             "grand_total_difference": float(grand_diff) if grand_diff is not None else None,
             "calculated_total": float(expected_grand) if expected_grand is not None else None,
             "total_status": (
-                "CHECKED"
+                "MISMATCH"
+                if grand_diff is not None and grand_diff != 0
+                else "CHECKED"
                 if expected_grand is not None and grand_total is not None
+                else "NOT_VERIFIED"
+                if grand_total is not None
                 else "NOT_CHECKED"
             ),
             "findings": findings,
@@ -378,9 +446,6 @@ class AuditEngine:
                 reasons.append(f"unusually high quantity ({qty})")
             if total is None:
                 reasons.append("missing billed total")
-            if item.confidence is not None and item.confidence < 0.75:
-                reasons.append(f"low extraction confidence ({item.confidence:.0%})")
-
             if reasons:
                 findings.append({
                     "finding_type": "UNCLEAR_CHARGE",
@@ -396,6 +461,7 @@ class AuditEngine:
                     "status": "open",
                 })
 
+        unclear_count = len(findings)
         for field in dict.fromkeys(uncertain_fields or []):
             findings.append({
                 "finding_type": "UNCLEAR_CHARGE",
@@ -414,7 +480,8 @@ class AuditEngine:
             })
 
         return {
-            "unclear_count": len(findings),
+            "unclear_count": unclear_count,
+            "extraction_uncertainty_count": len(findings) - unclear_count,
             "findings": findings,
         }
 

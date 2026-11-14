@@ -22,7 +22,12 @@ class BillItemExtract(BaseModel):
     unit_price: Optional[float] = Field(None, description="Unit price of the item")
     total: Optional[float] = Field(None, description="Billed total for the item")
     category: Optional[str] = Field(None, description="Service category")
-    confidence: Optional[float] = Field(None, ge=0, le=1, description="Extraction confidence 0-1")
+    confidence: Optional[float] = Field(
+        None,
+        ge=0,
+        le=1,
+        description="Calibrated extraction confidence from a reliable source; omit otherwise",
+    )
 
 
 class BillExtraction(BaseModel):

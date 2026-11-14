@@ -220,31 +220,60 @@ def test_missing_discount_and_tax_are_not_assumed_zero():
     ))
 
     assert result["calculated_total"] is None
-    assert result["arithmetic"]["total_status"] == "NOT_CHECKED"
+    assert result["arithmetic"]["total_status"] == "NOT_VERIFIED"
     assert not any(
         finding.get("reason_code") == "GRAND_TOTAL_MISMATCH"
         for finding in result["findings"]
     )
+    assert any(
+        finding.get("reason_code") == "TOTAL_NOT_VERIFIED"
+        for finding in result["findings"]
+    )
+
+
+def test_missing_tax_reports_possible_gap_without_claiming_an_error():
+    result = AuditEngine().audit(_extraction(
+        [
+            BillItemExtract(item_name="Consultation", quantity=1, unit_price=800, total=800),
+            BillItemExtract(item_name="CBC", quantity=1, unit_price=650, total=650),
+            BillItemExtract(item_name="CBC", quantity=1, unit_price=650, total=650),
+            BillItemExtract(item_name="Chest X-ray", quantity=1, unit_price=1200, total=1200),
+            BillItemExtract(item_name="Registration fee", quantity=1, unit_price=150, total=150),
+        ],
+        grand_total=3300,
+        subtotal=3450,
+        discount=100,
+        tax=0,
+        uncertain_fields=["tax"],
+    ))
+
+    total_review = next(
+        finding for finding in result["findings"]
+        if finding.get("reason_code") == "TOTAL_NOT_VERIFIED"
+    )
+    assert result["calculated_total"] is None
+    assert result["arithmetic"]["total_status"] == "NOT_VERIFIED"
+    assert result["summary"]["confirmed_arithmetic_discrepancy"] == 0.0
+    assert total_review["estimated_difference"] == 50.0
+    assert "not a confirmed" in total_review["description"]
+    assert result["duplicates"]["possible_duplicates"] == 1
 
 
 def test_uncertain_extraction_is_a_confirmation_prompt():
     result = AuditEngine().audit(_extraction(
         [BillItemExtract(item_name="Lab", quantity=1, unit_price=500, total=500, confidence=0.4)],
         grand_total=500,
-        uncertain_fields=["grand_total"],
+        uncertain_fields=["grand_total", "hospital_name", "bill_number", "discount", "tax"],
     ))
 
     uncertainty = [
         finding for finding in result["findings"]
         if finding.get("reason_code") == "EXTRACTION_UNCERTAINTY"
     ]
-    assert len(uncertainty) == 1
+    assert len(uncertainty) == 5
     assert uncertainty[0]["title"] == "Confirm extracted grand total"
-    unclear_item = next(
-        finding for finding in result["findings"]
-        if finding.get("reason_code") == "UNCLEAR_CHARGE"
-    )
-    assert unclear_item["bill_item_index"] == 0
+    assert result["unclear_charges"]["unclear_count"] == 0
+    assert result["unclear_charges"]["extraction_uncertainty_count"] == 5
 
 
 def test_benchmark_check_requires_citation_and_compares_unit_rate_with_a_cap():

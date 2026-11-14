@@ -101,7 +101,7 @@ class GeminiService:
             "- patient_name, patient_id (if present)\n"
             "- bill_number, bill_date (YYYY-MM-DD)\n"
             "- admission_date, discharge_date (YYYY-MM-DD)\n"
-            "- items: list of {item_name, quantity, unit_price, total, category, confidence}\n"
+            "- items: list of {item_name, quantity, unit_price, total, category}\n"
             "- subtotal, discount, tax, grand_total\n"
             "- currency (default INR)\n"
             "- payment_info, miscellaneous_charges\n"
@@ -109,7 +109,9 @@ class GeminiService:
             "Rules:\n"
             "- Do not invent patient information or amounts.\n"
             "- If an amount is missing or unreadable, leave it as null (do not assume zero).\n"
-            "- Record low-confidence or ambiguous values in uncertain_fields.\n"
+            "- Extract discount and tax only when shown on the bill; do not infer them from the final total.\n"
+            "- Use the explicitly printed final amount due for grand_total, not a calculated amount or a value in explanatory notes.\n"
+            "- Record ambiguous or unreadable values in uncertain_fields.\n"
             "- Preserve original extracted text where practical.\n"
             "- Return ONLY valid JSON matching the schema.\n"
         )
@@ -130,6 +132,9 @@ class GeminiService:
         # Normalize dates: Gemini may return various formats; keep as strings, Pydantic validates loosely
         extraction = BillExtraction.model_validate(data)
         extraction.extraction_method = "GEMINI"
+        # Gemini's self-reported confidence is not a calibrated extraction probability.
+        for item in extraction.items:
+            item.confidence = None
         return extraction
 
     async def explain_findings(

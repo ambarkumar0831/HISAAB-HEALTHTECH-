@@ -119,7 +119,6 @@ class OCRService:
                             quantity=qty if qty else None,
                             unit_price=price,
                             total=total,
-                            confidence=0.5,
                         ))
                     except ValueError:
                         uncertain.append("items")

@@ -650,10 +650,10 @@ export default function Upload() {
             aria-modal="true"
             aria-labelledby="camera-title"
             aria-describedby="camera-help"
-            className="w-full max-w-2xl overflow-hidden rounded-2xl bg-white shadow-2xl"
+            className="flex h-[min(90dvh,48rem)] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl"
             onMouseDown={(event) => event.stopPropagation()}
           >
-            <header className="flex items-start justify-between gap-4 border-b border-slate-100 px-5 py-4 sm:px-6">
+            <header className="flex shrink-0 items-start justify-between gap-4 border-b border-slate-100 px-5 py-4 sm:px-6">
               <div>
                 <h2 id="camera-title" className="font-serif text-xl font-bold text-dark-teal">
                   Take a bill photo
@@ -672,14 +672,14 @@ export default function Upload() {
               </button>
             </header>
 
-            <div className="relative aspect-[4/3] max-h-[60vh] bg-slate-950">
+            <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-slate-950">
               <video
                 ref={videoRef}
                 autoPlay
                 playsInline
                 muted
                 onLoadedMetadata={() => setCameraReady(true)}
-                className="h-full w-full object-contain"
+                className="max-h-full max-w-full object-contain"
               />
               {cameraLoading && (
                 <div role="status" className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-slate-950/80 text-sm text-white">
@@ -694,7 +694,7 @@ export default function Upload() {
               )}
             </div>
 
-            <footer className="flex flex-col-reverse gap-2 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
+            <footer className="flex shrink-0 flex-col-reverse gap-2 px-5 py-4 sm:flex-row sm:justify-end sm:px-6">
               <button type="button" onClick={closeCamera} className="btn-outline min-h-10 justify-center py-2.5">
                 Cancel
               </button>
