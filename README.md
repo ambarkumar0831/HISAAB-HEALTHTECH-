@@ -138,7 +138,7 @@ The backend stores uploaded bills and generated reports on its local filesystem.
 
 ### Vercel multi-service demo
 
-The root `vercel.json` configures one Vercel project with the FastAPI backend at `app.main:app` and the Vite frontend. Requests to `/api/*` and `/health` go to the backend; other routes go to the frontend. The frontend uses same-origin API requests, so leave `VITE_API_BASE` unset.
+The root `vercel.json` configures one Vercel project with the FastAPI backend at `app.main:app` and the Vite frontend. Requests to `/api/*` and `/health` go to the backend; browser routes are served through the frontend's `index.html`, while assets are served directly. The frontend uses same-origin API requests, so leave `VITE_API_BASE` unset.
 
 Enter variables directly in Vercel's Environment Variables settings; do not upload a local `.env` file. Configure `DATABASE_URL`, `GEMINI_API_KEY`, and `SUPABASE_URL` for the backend service. Add `SUPABASE_JWT_SECRET` only if your Supabase project uses HS256 signing. Configure `VITE_SUPABASE_URL` and the public `VITE_SUPABASE_ANON_KEY` for the frontend. Never prefix private values with `VITE_`. Set the backend's `UPLOAD_DIR` and `REPORT_DIR` to writable temporary paths such as `/tmp/uploads` and `/tmp/reports`.
 
